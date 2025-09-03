@@ -1,10 +1,12 @@
-"""Embedding manager for the embedding service."""
+"""Enhanced embedding manager for the embedding service."""
 
 import logging
 import asyncio
 import time
 from typing import List, Dict, Any, Optional, Union
 import numpy as np
+from dataclasses import dataclass
+from enum import Enum
 
 from .config_manager import ConfigManager
 from .model_manager import ModelManager
@@ -16,6 +18,132 @@ from .utils import (
     EmbeddingCompressor,
     PreprocessingError
 )
+from .utils.caching import EmbeddingCache, create_embedding_cache
+
+try:
+    from prometheus_client import Counter, Histogram, Gauge
+    PROMETHEUS_AVAILABLE = True
+except ImportError:
+    PROMETHEUS_AVAILABLE = False
+
+
+class RequestPriority(Enum):
+    """Request priority levels."""
+    LOW = 1
+    NORMAL = 2
+    HIGH = 3
+
+
+@dataclass
+class EmbeddingRequest:
+    """Enhanced embedding request with priority and metadata."""
+    inputs: List[Union[str, Dict[str, Any]]]
+    model: str
+    input_type: Optional[str] = None
+    modality: Optional[Union[str, List[str]]] = None
+    embedding_type: str = 'float'
+    dimensions: Optional[int] = None
+    normalize: bool = True
+    priority: RequestPriority = RequestPriority.NORMAL
+    request_id: Optional[str] = None
+    user_id: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class BatchRequest:
+    """Batch processing request."""
+    requests: List[EmbeddingRequest]
+    created_at: float
+    priority: RequestPriority
+
+
+class EmbeddingManager:
+    """Enhanced embedding manager with advanced features."""
+    
+    def __init__(self, config_manager: ConfigManager, model_manager: ModelManager):
+        """Initialize the enhanced embedding manager.
+        
+        Args:
+            config_manager: Configuration manager instance
+            model_manager: Model manager instance
+        """
+        self.config_manager = config_manager
+        self.model_manager = model_manager
+        self.logger = logging.getLogger(__name__)
+        
+        # Initialize processors
+        self.text_processor = TextPreprocessor()
+        self.image_processor = ImagePreprocessor()
+        self.modality_detector = ModalityDetector()
+        self.embedding_processor = EmbeddingPostprocessor()
+        self.compressor = EmbeddingCompressor()
+        
+        # Initialize caching if enabled
+        self.cache: Optional[EmbeddingCache] = None
+        if self.config_manager.is_caching_enabled():
+            try:
+                self.cache = create_embedding_cache(self.config_manager)
+                self.logger.info(f"Caching enabled with backend: {self.config_manager.get_cache_backend()}")
+            except Exception as e:
+                self.logger.error(f"Failed to initialize cache: {e}")
+                self.cache = None
+        
+        # Batch processing settings
+        self.max_batch_size = self.config_manager.get_max_batch_size()
+        self.enable_dynamic_batching = self.config_manager.is_dynamic_batching_enabled()
+        self.batch_timeout_ms = self.config_manager.get_batch_timeout_ms()
+        
+        # Request queues for dynamic batching (one per priority)
+        self._request_queues = {
+            RequestPriority.HIGH: asyncio.Queue(),
+            RequestPriority.NORMAL: asyncio.Queue(),
+            RequestPriority.LOW: asyncio.Queue()
+        }
+        self._batch_processor_task = None
+        self._processing_stats = {
+            'total_requests': 0,
+            'cached_requests': 0,
+            'batched_requests': 0,
+            'total_processing_time': 0.0,
+            'average_batch_size': 0.0
+        }
+        
+        # Initialize Prometheus metrics if available
+        self._init_metrics()
+        
+    def _init_metrics(self):
+        """Initialize Prometheus metrics."""
+        if not PROMETHEUS_AVAILABLE or not self.config_manager.is_monitoring_enabled():
+            return
+            
+        self.request_counter = Counter(
+            'embedding_requests_total',
+            'Total embedding requests',
+            ['model', 'status', 'priority']
+        )
+        
+        self.request_duration = Histogram(
+            'embedding_request_duration_seconds',
+            'Request processing duration',
+            ['model', 'batch_size']
+        )
+        
+        self.cache_hits = Counter(
+            'embedding_cache_hits_total',
+            'Cache hits',
+            ['model']
+        )
+        
+        self.active_requests = Gauge(
+            'embedding_active_requests',
+            'Currently active requests'
+        )
+        
+        self.batch_size_histogram = Histogram(
+            'embedding_batch_size',
+            'Batch sizes used for processing'
+        )
 
 
 class EmbeddingManager:

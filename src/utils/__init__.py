@@ -4,6 +4,13 @@ from .preprocessing import TextPreprocessor, ImagePreprocessor, ModalityDetector
 from .postprocessing import EmbeddingPostprocessor
 from .compression import EmbeddingCompressor
 
+# Caching utilities (optional import)
+try:
+    from .caching import EmbeddingCache, create_embedding_cache, create_cache_backend
+    CACHING_AVAILABLE = True
+except ImportError:
+    CACHING_AVAILABLE = False
+
 __all__ = [
     'TextPreprocessor',
     'ImagePreprocessor', 
@@ -12,3 +19,10 @@ __all__ = [
     'EmbeddingPostprocessor',
     'EmbeddingCompressor'
 ]
+
+if CACHING_AVAILABLE:
+    __all__.extend([
+        'EmbeddingCache',
+        'create_embedding_cache',
+        'create_cache_backend'
+    ])

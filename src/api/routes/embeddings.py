@@ -1,8 +1,11 @@
-"""Embedding generation endpoints."""
+"""Enhanced embedding generation endpoints."""
 
 import logging
+import time
+import uuid
 from typing import Union, List
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse
 from ..models import (
     EmbeddingRequest, 
     EmbeddingResponse, 
@@ -13,24 +16,73 @@ from ..models import (
     create_error_response
 )
 
+try:
+    from prometheus_client import Counter, Histogram
+    PROMETHEUS_AVAILABLE = True
+except ImportError:
+    PROMETHEUS_AVAILABLE = False
+
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+# Metrics (if Prometheus is available)
+if PROMETHEUS_AVAILABLE:
+    api_request_counter = Counter(
+        'embedding_api_requests_total',
+        'Total API requests',
+        ['endpoint', 'method', 'status']
+    )
+    
+    api_request_duration = Histogram(
+        'embedding_api_request_duration_seconds',
+        'API request duration',
+        ['endpoint', 'method']
+    )
+
+
+def track_metrics(endpoint: str, method: str = "POST"):
+    """Decorator to track API metrics."""
+    def decorator(func):
+        async def wrapper(*args, **kwargs):
+            start_time = time.time()
+            status = "success"
+            
+            try:
+                result = await func(*args, **kwargs)
+                return result
+            except HTTPException as e:
+                status = f"error_{e.status_code}"
+                raise
+            except Exception as e:
+                status = "error_500"
+                raise
+            finally:
+                if PROMETHEUS_AVAILABLE:
+                    api_request_counter.labels(
+                        endpoint=endpoint,
+                        method=method,
+                        status=status
+                    ).inc()
+                    
+                    api_request_duration.labels(
+                        endpoint=endpoint,
+                        method=method
+                    ).observe(time.time() - start_time)
+        
+        return wrapper
+    return decorator
+
 
 @router.post("/v1/embeddings", response_model=EmbeddingResponse)
+@track_metrics("embeddings", "POST")
 async def create_embeddings(request: EmbeddingRequest, http_request: Request):
     """Generate embeddings for input text(s).
     
-    This endpoint is compatible with OpenAI's embeddings API and NVIDIA NIM specification.
-    Supports various input types, embedding types, and modalities.
-    
-    Args:
-        request: Embedding request with input texts and parameters
-        http_request: FastAPI request object for accessing app state
-        
-    Returns:
-        EmbeddingResponse with generated embeddings and metadata
+    Enhanced version with caching, metrics, and priority handling.
     """
+    request_id = str(uuid.uuid4())
+    start_time = time.time()
+    
     try:
         # Get service components
         embedding_manager = getattr(http_request.app.state, 'embedding_manager', None)
@@ -57,14 +109,14 @@ async def create_embeddings(request: EmbeddingRequest, http_request: Request):
         # Determine effective input_type
         effective_input_type = request.input_type or suffix_input_type
         
-        # Log request
+        # Log request with ID
         logger.info(
-            f"Embedding request: model={request.model}, "
+            f"[{request_id}] Embedding request: model={request.model}, "
             f"inputs={len(inputs)}, input_type={effective_input_type}, "
             f"embedding_type={request.embedding_type}"
         )
         
-        # Generate embeddings
+        # Generate embeddings with enhanced manager
         try:
             response = await embedding_manager.generate_embeddings(
                 inputs=inputs,
@@ -76,25 +128,223 @@ async def create_embeddings(request: EmbeddingRequest, http_request: Request):
                 normalize=request.normalize
             )
             
+            # Add request metadata
+            response['request_id'] = request_id
+            response['processing_time'] = time.time() - start_time
+            
             # Convert to API response format
             return EmbeddingResponse(**response)
             
         except ValueError as e:
-            # Handle validation errors
+            logger.error(f"[{request_id}] Validation error: {str(e)}")
             raise HTTPException(status_code=400, detail=str(e))
         except RuntimeError as e:
-            # Handle runtime errors (model loading, etc.)
+            logger.error(f"[{request_id}] Runtime error: {str(e)}")
             raise HTTPException(status_code=500, detail=str(e))
         except Exception as e:
-            # Handle unexpected errors
-            logger.error(f"Unexpected error in embedding generation: {str(e)}")
+            logger.error(f"[{request_id}] Unexpected error: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error in create_embeddings endpoint: {str(e)}")
+        logger.error(f"[{request_id}] Error in create_embeddings endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@router.websocket("/v1/embeddings/stream")
+async def streaming_embeddings(websocket: WebSocket):
+    """WebSocket endpoint for streaming embeddings.
+    
+    Allows real-time embedding generation with live updates.
+    """
+    await websocket.accept()
+    
+    try:
+        # Get service components
+        embedding_manager = getattr(websocket.app.state, 'embedding_manager', None)
+        config_manager = getattr(websocket.app.state, 'config_manager', None)
+        
+        if not embedding_manager or not config_manager:
+            await websocket.send_json({"error": "Service not properly initialized"})
+            return
+        
+        while True:
+            try:
+                # Receive request
+                data = await websocket.receive_json()
+                request_id = str(uuid.uuid4())
+                
+                # Validate basic structure
+                if 'model' not in data or 'input' not in data:
+                    await websocket.send_json({
+                        "error": "Missing required fields: model, input",
+                        "request_id": request_id
+                    })
+                    continue
+                
+                # Send acknowledgment
+                await websocket.send_json({
+                    "status": "processing",
+                    "request_id": request_id,
+                    "message": "Request received and processing started"
+                })
+                
+                # Process embeddings
+                try:
+                    inputs = data['input'] if isinstance(data['input'], list) else [data['input']]
+                    
+                    response = await embedding_manager.generate_embeddings(
+                        inputs=inputs,
+                        model=data['model'],
+                        input_type=data.get('input_type'),
+                        modality=data.get('modality'),
+                        embedding_type=data.get('embedding_type', 'float'),
+                        dimensions=data.get('dimensions'),
+                        normalize=data.get('normalize', True)
+                    )
+                    
+                    # Send success response
+                    response['request_id'] = request_id
+                    response['status'] = 'completed'
+                    await websocket.send_json(response)
+                    
+                except Exception as e:
+                    # Send error response
+                    await websocket.send_json({
+                        "status": "error",
+                        "request_id": request_id,
+                        "error": str(e)
+                    })
+                
+            except WebSocketDisconnect:
+                logger.info("WebSocket client disconnected")
+                break
+            except Exception as e:
+                logger.error(f"WebSocket error: {str(e)}")
+                await websocket.send_json({
+                    "status": "error",
+                    "error": f"Processing error: {str(e)}"
+                })
+                
+    except Exception as e:
+        logger.error(f"WebSocket handler error: {str(e)}")
+    finally:
+        try:
+            await websocket.close()
+        except:
+            pass
+
+
+@router.post("/v1/embeddings/batch", response_model=List[EmbeddingResponse])
+@track_metrics("embeddings_batch", "POST")
+async def create_embeddings_batch(requests: List[EmbeddingRequest], http_request: Request):
+    """Process multiple embedding requests in a single batch.
+    
+    Optimized for high-throughput scenarios.
+    """
+    batch_id = str(uuid.uuid4())
+    start_time = time.time()
+    
+    try:
+        # Get service components
+        embedding_manager = getattr(http_request.app.state, 'embedding_manager', None)
+        config_manager = getattr(http_request.app.state, 'config_manager', None)
+        
+        if not embedding_manager or not config_manager:
+            raise HTTPException(
+                status_code=500, 
+                detail="Service not properly initialized"
+            )
+        
+        # Validate batch size
+        max_batch_size = config_manager.get_max_batch_size()
+        if len(requests) > max_batch_size:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Batch size {len(requests)} exceeds maximum {max_batch_size}"
+            )
+        
+        logger.info(f"[{batch_id}] Processing batch of {len(requests)} requests")
+        
+        # Process all requests
+        responses = []
+        for i, request in enumerate(requests):
+            request_id = f"{batch_id}_{i}"
+            
+            try:
+                # Validate individual request
+                await _validate_request(request, config_manager)
+                
+                # Process request
+                inputs = request.input if isinstance(request.input, list) else [request.input]
+                base_model_name, suffix_input_type = validate_model_name(request.model)
+                effective_input_type = request.input_type or suffix_input_type
+                
+                response = await embedding_manager.generate_embeddings(
+                    inputs=inputs,
+                    model=request.model,
+                    input_type=effective_input_type,
+                    modality=request.modality,
+                    embedding_type=request.embedding_type,
+                    dimensions=request.dimensions,
+                    normalize=request.normalize
+                )
+                
+                response['request_id'] = request_id
+                responses.append(EmbeddingResponse(**response))
+                
+            except Exception as e:
+                logger.error(f"[{request_id}] Error processing request: {str(e)}")
+                # Add error response for this request
+                error_response = EmbeddingResponse(
+                    object="error",
+                    data=[],
+                    model=request.model,
+                    usage={"prompt_tokens": 0, "total_tokens": 0},
+                    error=str(e)
+                )
+                responses.append(error_response)
+        
+        total_time = time.time() - start_time
+        logger.info(f"[{batch_id}] Batch completed in {total_time:.2f}s")
+        
+        return responses
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[{batch_id}] Batch processing error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Batch processing error: {str(e)}")
+
+
+@router.get("/v1/embeddings/metrics")
+@track_metrics("embeddings_metrics", "GET") 
+async def get_embedding_metrics(http_request: Request):
+    """Get embedding service metrics and statistics."""
+    try:
+        embedding_manager = getattr(http_request.app.state, 'embedding_manager', None)
+        
+        if not embedding_manager:
+            raise HTTPException(status_code=500, detail="Service not initialized")
+        
+        # Get cache statistics if available
+        cache_stats = {}
+        if hasattr(embedding_manager, 'cache') and embedding_manager.cache:
+            cache_stats = embedding_manager.cache.get_stats()
+        
+        # Get processing statistics
+        processing_stats = getattr(embedding_manager, '_processing_stats', {})
+        
+        return {
+            "cache_statistics": cache_stats,
+            "processing_statistics": processing_stats,
+            "service_status": "healthy"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting metrics: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 async def _validate_request(request: EmbeddingRequest, config_manager) -> None:
