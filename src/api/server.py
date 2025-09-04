@@ -45,19 +45,32 @@ async def lifespan(app: FastAPI):
         embedding_manager = EmbeddingManager(config_manager, model_manager)
         app.state.embedding_manager = embedding_manager
         
-        # Load default model if specified
+        # Mark service as ready for basic operations BEFORE model loading
+        app.state.service_ready = True
+        logger.info("Service ready for basic operations")
+        
+        # Load default model asynchronously to avoid blocking startup
         default_model = config_manager.get_default_model()
         if default_model:
-            logger.info(f"Loading default model: {default_model}")
-            try:
-                success = model_manager.load_model(default_model)
-                if success:
-                    logger.info(f"Default model {default_model} loaded successfully")
-                else:
-                    logger.warning(f"Failed to load default model {default_model}")
-            except Exception as e:
-                logger.error(f"Failed to load default model {default_model}: {str(e)}")
-                # Continue without default model - can be loaded later via API
+            logger.info(f"Starting background loading of default model: {default_model}")
+            # Create background task for model loading
+            async def load_default_model():
+                try:
+                    success = model_manager.load_model(default_model)
+                    if success:
+                        logger.info(f"Default model {default_model} loaded successfully")
+                        app.state.default_model_loaded = True
+                    else:
+                        logger.warning(f"Failed to load default model {default_model}")
+                        app.state.default_model_loaded = False
+                except Exception as e:
+                    logger.error(f"Failed to load default model {default_model}: {str(e)}")
+                    app.state.default_model_loaded = False
+            
+            # Start background model loading
+            asyncio.create_task(load_default_model())
+        else:
+            app.state.default_model_loaded = True
         
         app.state.service_ready = True
         logger.info("Embedding service started successfully")

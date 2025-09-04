@@ -99,6 +99,19 @@ async def startup_check(request: Request):
         )
 
 
+@router.get("/health/live", response_model=HealthResponse)
+async def simple_liveness_check():
+    """Super fast liveness check for Docker health check.
+    
+    Minimal endpoint that just confirms service is responding.
+    No heavy operations, no model checking.
+    """
+    return HealthResponse(
+        message="Service is alive.",
+        status="alive"
+    )
+
+
 @router.get("/v1/health/live", response_model=HealthResponse)
 async def liveness_check(request: Request):
     """Kubernetes liveness probe endpoint.

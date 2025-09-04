@@ -51,8 +51,9 @@ ENV PATH="/opt/venv/bin:$PATH"
 # Install minimal runtime dependencies
 RUN apt-get update && apt-get install -y \
     python3 \
-    python3-distutils \
+    python3-dev \
     curl \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
@@ -75,9 +76,11 @@ RUN useradd -m -u 1002 embedding_user && \
 # Switch to non-root user
 USER embedding_user
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:${PORT:-8009}/v1/health/ready || exit 1
+# Health check - Optimized for faster response
+# Use liveness endpoint instead of readiness for Docker health check
+# Readiness is slower due to model loading checks
+HEALTHCHECK --interval=20s --timeout=5s --start-period=120s --retries=3 \
+    CMD curl -f http://localhost:${PORT:-8009}/health/live || exit 1
 
 # Expose port
 EXPOSE 8009
