@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.exceptions import RequestValidationError
 import uvicorn
 import time
@@ -130,6 +130,18 @@ def create_app() -> FastAPI:
     app.include_router(health.router, tags=["health"])
     app.include_router(models.router, tags=["models"])
     app.include_router(embeddings.router, tags=["embeddings"])
+    
+    # Add metrics endpoint for Prometheus
+    try:
+        from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+        
+        @app.get("/metrics")
+        async def metrics():
+            """Prometheus metrics endpoint."""
+            return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+            
+    except ImportError:
+        logger.warning("Prometheus client not available, /metrics endpoint disabled")
     
     # Add exception handlers
     @app.exception_handler(HTTPException)
