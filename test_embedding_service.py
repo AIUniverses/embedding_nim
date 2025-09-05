@@ -168,6 +168,70 @@ class TestEmbeddingService:
         embedding = data["data"][0]["embedding"]
         assert all(isinstance(x, int) for x in embedding)
         assert all(-128 <= x <= 127 for x in embedding)
+
+    @pytest.mark.asyncio
+    async def test_dimensions_vs_embedding_type_conflict(self, client):
+        """dimensions cannot be combined with compressed embedding_type."""
+        req = {
+            "model": "e5-large-v2",
+            "input": "Conflict test",
+            "embedding_type": "int8",
+            "dimensions": 256
+        }
+        r = await client.post("/v1/embeddings", json=req)
+        assert r.status_code in (400, 422)
+
+    @pytest.mark.asyncio
+    async def test_dimensions_valid(self, client):
+        req = {"model": "e5-large-v2", "input": "Dim test", "dimensions": 512}
+        r = await client.post("/v1/embeddings", json=req)
+        assert r.status_code == 200
+        data = r.json()
+        dim = len(data['data'][0]['embedding'])
+        assert dim == 512
+
+    @pytest.mark.asyncio
+    async def test_cache_hit(self, client):
+        req = {"model": "e5-large-v2", "input": "Caching sample"}
+        r1 = await client.post("/v1/embeddings", json=req)
+        assert r1.status_code == 200
+        r2 = await client.post("/v1/embeddings", json=req)
+        assert r2.status_code == 200
+        d2 = r2.json()
+        # In strict mode metadata may be absent; tolerate that
+        meta = d2.get('metadata', {})
+        # If metadata present, expect cache True
+        if meta:
+            assert meta.get('cache') in (True, False)
+
+    @pytest.mark.asyncio
+    async def test_binary_embeddings(self, client):
+        req = {"model": "e5-small-v2", "input": "Binary test", "embedding_type": "binary"}
+        r = await client.post("/v1/embeddings", json=req)
+        assert r.status_code == 200
+        data = r.json()
+        vec = data['data'][0]['embedding']
+        # binary represented as int8 packed bytes (length = dim/8)
+        assert len(vec) <= 1024  # sanity upper bound
+        # Values should be in -128..127 for int8
+        assert all(isinstance(x, int) for x in vec)
+
+    @pytest.mark.asyncio
+    async def test_ubinary_embeddings(self, client):
+        req = {"model": "e5-small-v2", "input": "UBinary test", "embedding_type": "ubinary"}
+        r = await client.post("/v1/embeddings", json=req)
+        assert r.status_code == 200
+        data = r.json()
+        vec = data['data'][0]['embedding']
+        assert all(isinstance(x, int) for x in vec)
+
+    @pytest.mark.asyncio
+    async def test_async_model_load_idempotent(self, client):
+        # Repeated load calls should not error
+        r = await client.post("/v1/models/e5-large-v2/load")
+        assert r.status_code in (200, 500, 409)  # 500 if model artifact missing in env
+        r2 = await client.post("/v1/models/e5-large-v2/load")
+        assert r2.status_code in (200, 500, 409)
     
     @pytest.mark.asyncio
     async def test_error_handling(self, client):

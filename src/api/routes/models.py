@@ -116,7 +116,11 @@ async def load_model(model_id: str, request: Request):
             )
         
         # Load the model
-        success = model_manager.load_model(base_model_name)
+        # Prefer async load if available
+        if hasattr(model_manager, 'load_model_async'):
+            success = await model_manager.load_model_async(base_model_name)
+        else:
+            success = model_manager.load_model(base_model_name)
         
         if success:
             return HealthResponse(

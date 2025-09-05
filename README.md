@@ -160,6 +160,19 @@ ADAPTIVE_BATCHING=true                 # Enable adaptive sizing
 
 # GPU configuration
 CUDA_VISIBLE_DEVICES=0                 # GPU device selection
+
+# Strict compatibility (hide metadata fields)
+STRICT_NIM_MODE=false
+
+# Truncation strategy for overlength inputs (none|head|tail|mid)
+TRUNCATE=none
+
+# Enable deterministic placeholder image embeddings (for development only)
+ENABLE_FAKE_IMAGE_EMBEDDINGS=false
+
+# API security
+EMBEDDING_API_KEY=your-secret-key
+RATE_LIMIT_PER_MINUTE=100
 ```
 
 ### Model Configuration
@@ -303,6 +316,10 @@ export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
 - Enable dynamic batching for higher throughput
 - Adjust batch sizes based on GPU memory
 - Use priority queues for SLA-critical requests
+ - Cross-request micro-batching merges compatible single-text calls within batch_timeout window
+
+### Strict Mode
+Set `STRICT_NIM_MODE=true` để trả về phản hồi tối giản giống NIM/OpenAI (ẩn metadata phụ trợ, cache flag).
 
 ## 📚 API Reference
 

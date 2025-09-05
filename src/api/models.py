@@ -1,7 +1,7 @@
 """Pydantic models for the embedding API."""
 
 from typing import List, Optional, Union, Any, Dict
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 import re
 
 
@@ -52,7 +52,8 @@ class EmbeddingRequest(BaseModel):
         description="Whether to normalize embeddings"
     )
     
-    @validator('input')
+    @field_validator('input')
+    @classmethod
     def validate_input(cls, v):
         """Validate input field."""
         if isinstance(v, str):
@@ -71,7 +72,8 @@ class EmbeddingRequest(BaseModel):
         
         return v
     
-    @validator('modality')
+    @field_validator('modality')
+    @classmethod
     def validate_modality(cls, v):
         """Validate modality field."""
         valid_modalities = {'text', 'image', 'text_image'}

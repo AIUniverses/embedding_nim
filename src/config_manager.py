@@ -82,16 +82,16 @@ class ConfigManager:
             with open(self.config_path, 'r', encoding='utf-8') as f:
                 config = yaml.safe_load(f)
                 
-            # Use OmegaConf for advanced configuration management if available
-            if OMEGA_CONF_AVAILABLE:
-                config = OmegaConf.create(config)
-                
-            # Validate configuration structure
+            # Validate configuration structure before OmegaConf conversion
             if not isinstance(config, dict):
                 raise ValueError("Configuration must be a dictionary")
                 
             if 'models' not in config:
                 raise ValueError("Configuration must contain 'models' section")
+                
+            # Use OmegaConf for advanced configuration management if available
+            if OMEGA_CONF_AVAILABLE:
+                config = OmegaConf.create(config)
                 
             return config
             
@@ -254,98 +254,12 @@ class ConfigManager:
             'monitoring_enabled': self.deployment.enable_monitoring,
             'vector_db_enabled': self.deployment.enable_vector_db
         }
+    # ---------------- Additional helpers ----------------
+    def get_truncate_strategy(self) -> str:
+        return self.config.get('service', {}).get('truncate', 'none')  # none|head|tail|mid
 
-import os
-import yaml
-import logging
-from typing import Dict, Any, List, Optional, Union
-from pathlib import Path
-from dataclasses import dataclass
-from omegaconf import OmegaConf
-
-
-@dataclass
-class DeploymentConfig:
-    """Deployment configuration settings."""
-    mode: str = "simple"  # simple or full
-    enable_redis: bool = False
-    enable_monitoring: bool = False
-    enable_vector_db: bool = False
-    redis_url: str = "redis://localhost:6379"
-    prometheus_port: int = 9090
-    grafana_port: int = 3000
-    max_workers: int = 1
-    
-    
-@dataclass 
-class CachingConfig:
-    """Caching configuration settings."""
-    enabled: bool = True
-    backend: str = "memory"  # memory, redis, disk
-    ttl_seconds: int = 3600
-    max_size: int = 1000
-    compression: bool = False
-    
-
-@dataclass
-class BatchingConfig:
-    """Dynamic batching configuration."""
-    enabled: bool = True
-    max_batch_size: int = 32
-    timeout_ms: int = 10
-    adaptive_sizing: bool = True
-    priority_levels: int = 3
-
-
-class ConfigManager:
-    """Enhanced configuration manager for the embedding service."""
-    
-    def __init__(self, config_path: str = "config/models.yaml"):
-        """Initialize the configuration manager.
-        
-        Args:
-            config_path: Path to the YAML configuration file
-        """
-        self.config_path = Path(config_path)
-        self.config = self._load_config()
-        self.logger = logging.getLogger(__name__)
-        
-        # Load deployment configuration from environment
-        self.deployment = self._load_deployment_config()
-        self.caching = self._load_caching_config()
-        self.batching = self._load_batching_config()
-        
-    def _load_config(self) -> Dict[str, Any]:
-        """Load configuration from YAML file.
-        
-        Returns:
-            Dictionary containing the configuration
-            
-        Raises:
-            FileNotFoundError: If config file doesn't exist
-            yaml.YAMLError: If config file is invalid YAML
-        """
-        if not self.config_path.exists():
-            raise FileNotFoundError(f"Configuration file not found: {self.config_path}")
-            
-        try:
-            with open(self.config_path, 'r', encoding='utf-8') as f:
-                config = yaml.safe_load(f)
-                
-            # Use OmegaConf for advanced configuration management
-            config = OmegaConf.create(config)
-                
-            # Validate configuration structure
-            if not isinstance(config, dict):
-                raise ValueError("Configuration must be a dictionary")
-                
-            if 'models' not in config:
-                raise ValueError("Configuration must contain 'models' section")
-                
-            return config
-            
-        except yaml.YAMLError as e:
-            raise yaml.YAMLError(f"Invalid YAML in configuration file: {e}")
+    def should_return_metadata(self) -> bool:
+        return self.config.get('service', {}).get('return_metadata', True)
     
     def _load_deployment_config(self) -> DeploymentConfig:
         """Load deployment configuration from environment variables."""

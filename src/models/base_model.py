@@ -175,6 +175,28 @@ class BaseEmbeddingModel(ABC):
             return self._convert_to_binary(embeddings, signed=False)
         else:
             return embeddings.astype(np.float32)
+
+        # -------------------- Added utility methods --------------------
+        def count_tokens(self, texts: List[str]) -> int:
+            """Approximate token count for usage metrics.
+            Prefers the tokenizer if available; falls back to whitespace split.
+            Args:
+                texts: list of raw (already prefix-processed) texts
+            Returns:
+                total token count (int)
+            """
+            if hasattr(self, 'tokenizer') and self.tokenizer is not None:
+                try:
+                    # HuggingFace tokenizers support batching
+                    enc = self.tokenizer(texts, truncation=False, add_special_tokens=True)
+                    if 'input_ids' in enc:
+                        if isinstance(enc['input_ids'][0], list):
+                            return sum(len(ids) for ids in enc['input_ids'])
+                        return len(enc['input_ids'])
+                except Exception:
+                    pass
+            # Fallback simple heuristic
+            return sum(len(t.strip().split()) for t in texts)
     
     def _convert_to_int8(self, embeddings: np.ndarray) -> np.ndarray:
         """Convert float embeddings to int8."""

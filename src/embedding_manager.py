@@ -1,6 +1,9 @@
 """Enhanced embedding manager for the embedding service."""
 
 import logging
+import os
+import hashlib
+import math
 import asyncio
 import time
 from typing import List, Dict, Any, Optional, Union
@@ -59,48 +62,37 @@ class BatchRequest:
 
 
 class EmbeddingManager:
-    """Enhanced embedding manager with advanced features."""
-    
+    """Unified embedding manager with caching, batching, metrics, and preprocessing."""
+
     def __init__(self, config_manager: ConfigManager, model_manager: ModelManager):
-        """Initialize the enhanced embedding manager.
-        
-        Args:
-            config_manager: Configuration manager instance
-            model_manager: Model manager instance
-        """
         self.config_manager = config_manager
         self.model_manager = model_manager
         self.logger = logging.getLogger(__name__)
-        
-        # Initialize processors
+
+        # Processors
         self.text_processor = TextPreprocessor()
         self.image_processor = ImagePreprocessor()
         self.modality_detector = ModalityDetector()
         self.embedding_processor = EmbeddingPostprocessor()
         self.compressor = EmbeddingCompressor()
-        
-        # Initialize caching if enabled
+
+        # Caching
         self.cache: Optional[EmbeddingCache] = None
         if self.config_manager.is_caching_enabled():
             try:
                 self.cache = create_embedding_cache(self.config_manager)
-                self.logger.info(f"Caching enabled with backend: {self.config_manager.get_cache_backend()}")
+                self.logger.info(f"Caching enabled ({self.config_manager.get_cache_backend()})")
             except Exception as e:
-                self.logger.error(f"Failed to initialize cache: {e}")
-                self.cache = None
-        
-        # Batch processing settings
+                self.logger.error(f"Cache init failed: {e}")
+
+        # Batching
         self.max_batch_size = self.config_manager.get_max_batch_size()
         self.enable_dynamic_batching = self.config_manager.is_dynamic_batching_enabled()
         self.batch_timeout_ms = self.config_manager.get_batch_timeout_ms()
-        
-        # Request queues for dynamic batching (one per priority)
-        self._request_queues = {
-            RequestPriority.HIGH: asyncio.Queue(),
-            RequestPriority.NORMAL: asyncio.Queue(),
-            RequestPriority.LOW: asyncio.Queue()
-        }
+        self._request_queue = asyncio.Queue() if self.enable_dynamic_batching else None
         self._batch_processor_task = None
+
+        # Stats
         self._processing_stats = {
             'total_requests': 0,
             'cached_requests': 0,
@@ -108,73 +100,135 @@ class EmbeddingManager:
             'total_processing_time': 0.0,
             'average_batch_size': 0.0
         }
-        
-        # Initialize Prometheus metrics if available
+
+        # Strict mode (hide extra metadata to mimic NIM/OpenAI)
+        self.strict_mode = (os.getenv('STRICT_NIM_MODE', 'false').lower() == 'true')
+
         self._init_metrics()
-        
+        # Internal queue items for cross-request batching
+        # Each item: { 'future': Future, 'params': { ... }, 'key': batching_key }
+        if self.enable_dynamic_batching and self._request_queue is None:
+            self._request_queue = asyncio.Queue()
+
     def _init_metrics(self):
-        """Initialize Prometheus metrics."""
-        if not PROMETHEUS_AVAILABLE or not self.config_manager.is_monitoring_enabled():
-            return
+        if PROMETHEUS_AVAILABLE and self.config_manager.is_monitoring_enabled():
+            self.request_counter = Counter('embedding_requests_total','Total embedding requests',['model','status'])
+            self.request_duration = Histogram('embedding_request_duration_seconds','Request processing duration',['model'])
+            self.cache_hits = Counter('embedding_cache_hits_total','Cache hits',['model'])
+            self.batch_size_histogram = Histogram('embedding_batch_size','Batch sizes used for processing')
+            self.queue_size_gauge = Gauge('embedding_batch_queue_size','Current dynamic batch queue size')
+        else:
+            # Create dummy metrics when monitoring is disabled
+            class DummyMetric:
+                def labels(self, **kwargs): return self
+                def inc(self): pass
+                def observe(self, value): pass
+                def set(self, value): pass
             
-        self.request_counter = Counter(
-            'embedding_requests_total',
-            'Total embedding requests',
-            ['model', 'status', 'priority']
-        )
-        
-        self.request_duration = Histogram(
-            'embedding_request_duration_seconds',
-            'Request processing duration',
-            ['model', 'batch_size']
-        )
-        
-        self.cache_hits = Counter(
-            'embedding_cache_hits_total',
-            'Cache hits',
-            ['model']
-        )
-        
-        self.active_requests = Gauge(
-            'embedding_active_requests',
-            'Currently active requests'
-        )
-        
-        self.batch_size_histogram = Histogram(
-            'embedding_batch_size',
-            'Batch sizes used for processing'
-        )
+            self.request_counter = DummyMetric()
+            self.request_duration = DummyMetric()
+            self.cache_hits = DummyMetric()
+            self.batch_size_histogram = DummyMetric()
+            self.queue_size_gauge = DummyMetric()
 
+    async def start_batch_processor(self):
+        if self.enable_dynamic_batching and self._batch_processor_task is None:
+            self._batch_processor_task = asyncio.create_task(self._batch_processor_loop())
+            self.logger.info("Batch processor started")
 
-class EmbeddingManager:
-    """Manages embedding generation with preprocessing and postprocessing."""
-    
-    def __init__(self, config_manager: ConfigManager, model_manager: ModelManager):
-        """Initialize the embedding manager.
-        
-        Args:
-            config_manager: Configuration manager instance
-            model_manager: Model manager instance
-        """
-        self.config_manager = config_manager
-        self.model_manager = model_manager
-        self.logger = logging.getLogger(__name__)
-        
-        # Initialize processors
-        self.text_processor = TextPreprocessor()
-        self.image_processor = ImagePreprocessor()
-        self.modality_detector = ModalityDetector()
-        self.embedding_processor = EmbeddingPostprocessor()
-        self.compressor = EmbeddingCompressor()
-        
-        # Batch processing settings
-        self.max_batch_size = config_manager.get_max_batch_size()
-        self.enable_dynamic_batching = config_manager.is_dynamic_batching_enabled()
-        self.batch_timeout_ms = config_manager.get_batch_timeout_ms()
-        
-        # Request queue for dynamic batching
-        self._request_queue = asyncio.Queue() if self.enable_dynamic_batching else None
-        self._batch_processor_task = None
+    async def stop_batch_processor(self):
+        if self._batch_processor_task:
+            self._batch_processor_task.cancel()
+            try:
+                await self._batch_processor_task
+            except asyncio.CancelledError:
+                pass
+            self._batch_processor_task = None
+
+    async def generate_embeddings(self, inputs: List[Union[str, Dict[str, Any]]], model: str, input_type: Optional[str] = None, modality: Optional[Union[str, List[str]]] = None, embedding_type: str = 'float', dimensions: Optional[int] = None, normalize: bool = True) -> Dict[str, Any]:
+        start_time = time.time()
+        self._processing_stats['total_requests'] += 1
+        try:
+            # Normalize model & input_type
+            normalized_model, effective_input_type = self.model_manager.validate_model_request(model, input_type)
+            # Ensure model loaded (async)
+            await self.model_manager.ensure_model_loaded_async(normalized_model) if hasattr(self.model_manager,'ensure_model_loaded_async') else self.model_manager.ensure_model_loaded(normalized_model)
+            current_model = self.model_manager.get_current_model()
+            current_model.validate_embedding_type(embedding_type)
+
+            # Cross-request dynamic batching only when single text input and enabled
+            if self.enable_dynamic_batching and self._request_queue and isinstance(inputs, list) and len(inputs) == 1 and isinstance(inputs[0], str):
+                fut: asyncio.Future = asyncio.get_event_loop().create_future()
+                batching_key = (normalized_model, effective_input_type, embedding_type, dimensions, normalize)
+                await self._request_queue.put({
+                    'future': fut,
+                    'params': {
+                        'inputs': inputs,
+                        'model': normalized_model,
+                        'input_type': effective_input_type,
+                        'embedding_type': embedding_type,
+                        'dimensions': dimensions,
+                        'normalize': normalize,
+                        'modality': modality
+                    },
+                    'key': batching_key,
+                    'enqueued_at': time.time()
+                })
+                if not self._batch_processor_task:
+                    await self.start_batch_processor()
+                if PROMETHEUS_AVAILABLE:
+                    self.queue_size_gauge.set(self._request_queue.qsize())
+                result = await fut
+                return result
+
+            # Prepare raw text list (before preprocessing for cache key)
+            raw_texts = []
+            for item in inputs:
+                if isinstance(item, str):
+                    raw_texts.append(item)
+                elif isinstance(item, dict) and 'text' in item:
+                    raw_texts.append(item['text'])
+                else:
+                    raw_texts.append(str(item))
+
+            cache_key_kwargs = {
+                'input_type': effective_input_type,
+                'embedding_type': embedding_type,
+                'dimensions': dimensions,
+                'normalize': normalize,
+                'modality': modality
+            }
+            if self.cache:
+                cached = await self.cache.get_embeddings(raw_texts, normalized_model, **cache_key_kwargs)
+                if cached:
+                    self._processing_stats['cached_requests'] += 1
+                    if PROMETHEUS_AVAILABLE:
+                        self.cache_hits.labels(model=normalized_model).inc()
+                    return cached if self.strict_mode else {**cached, 'metadata': {**cached.get('metadata', {}), 'cache': True}}
+
+            processed_inputs = self._preprocess_inputs(inputs, modality)
+            embeddings = await self._generate_embeddings_internal(processed_inputs, current_model, effective_input_type, normalize)
+            final_embeddings = self._postprocess_embeddings(embeddings, embedding_type, dimensions, current_model)
+            generation_time = time.time() - start_time
+            response = self._create_response(final_embeddings, model, generation_time, processed_inputs, current_model, cache=False)
+
+            if self.cache:
+                await self.cache.set_embeddings(raw_texts, normalized_model, response, **cache_key_kwargs)
+
+            if PROMETHEUS_AVAILABLE:
+                self.request_counter.labels(model=normalized_model, status='success').inc()
+                self.request_duration.labels(model=normalized_model).observe(generation_time)
+                self.batch_size_histogram.observe(len(inputs))
+
+            if self.strict_mode:
+                # Remove metadata for strict compatibility
+                response.pop('metadata', None)
+            return response
+        except Exception as e:
+            if PROMETHEUS_AVAILABLE:
+                self.request_counter.labels(model=model, status='error').inc()
+            self.logger.error(f"Embedding generation failed: {e}")
+            raise
         
     async def start_batch_processor(self):
         """Start the dynamic batch processor."""
@@ -193,73 +247,7 @@ class EmbeddingManager:
             self._batch_processor_task = None
             self.logger.info("Dynamic batch processor stopped")
     
-    async def generate_embeddings(
-        self,
-        inputs: List[Union[str, Dict[str, Any]]],
-        model: str,
-        input_type: Optional[str] = None,
-        modality: Optional[Union[str, List[str]]] = None,
-        embedding_type: str = 'float',
-        dimensions: Optional[int] = None,
-        normalize: bool = True
-    ) -> Dict[str, Any]:
-        """Generate embeddings for inputs.
-        
-        Args:
-            inputs: List of input data (strings or dictionaries)
-            model: Model name to use
-            input_type: Input type ('query' or 'passage')
-            modality: Modality specification
-            embedding_type: Type of embeddings to return
-            dimensions: Target dimensions (for supported models)
-            normalize: Whether to normalize embeddings
-            
-        Returns:
-            Dictionary with embeddings and metadata
-        """
-        try:
-            start_time = time.time()
-            
-            # Validate and normalize model request
-            normalized_model, effective_input_type = self.model_manager.validate_model_request(
-                model, input_type
-            )
-            
-            # Ensure model is loaded
-            if not self.model_manager.ensure_model_loaded(normalized_model):
-                raise RuntimeError(f"Failed to load model {normalized_model}")
-            
-            current_model = self.model_manager.get_current_model()
-            
-            # Validate embedding type
-            current_model.validate_embedding_type(embedding_type)
-            
-            # Preprocess inputs
-            processed_inputs = self._preprocess_inputs(inputs, modality)
-            
-            # Generate embeddings
-            embeddings = await self._generate_embeddings_internal(
-                processed_inputs, current_model, effective_input_type, normalize
-            )
-            
-            # Postprocess embeddings
-            final_embeddings = self._postprocess_embeddings(
-                embeddings, embedding_type, dimensions, current_model
-            )
-            
-            generation_time = time.time() - start_time
-            
-            # Create response
-            response = self._create_response(
-                final_embeddings, model, generation_time, processed_inputs
-            )
-            
-            self.logger.info(f"Generated {len(inputs)} embeddings in {generation_time:.3f}s")
-            return response
-            
-        except Exception as e:
-            self.logger.error(f"Error generating embeddings: {str(e)}")
-            raise
+    # (old generate_embeddings removed – unified version above)
     
     def _preprocess_inputs(
         self, 
@@ -297,11 +285,18 @@ class EmbeddingManager:
                 
                 # Preprocess text if present
                 if 'text' in content:
-                    # Validate text length
-                    max_length = self.config_manager.get_max_input_length()
-                    self.text_processor.validate_text(content['text'], max_length)
-                    
-                    # Clean text
+                    max_length_chars = self.config_manager.get_max_input_length()
+                    self.text_processor.validate_text(content['text'], max_length_chars)
+                    # Truncate strategy
+                    strategy = self.config_manager.get_truncate_strategy()
+                    if strategy != 'none' and len(content['text']) > max_length_chars:
+                        if strategy == 'head':
+                            content['text'] = content['text'][:max_length_chars]
+                        elif strategy == 'tail':
+                            content['text'] = content['text'][-max_length_chars:]
+                        elif strategy == 'mid':
+                            half = max_length_chars // 2
+                            content['text'] = content['text'][:half] + content['text'][-(max_length_chars-half):]
                     content['text'] = self.text_processor.clean_text(content['text'])
                 
                 # Validate image if present
@@ -309,6 +304,7 @@ class EmbeddingManager:
                     format_str, image_bytes = self.image_processor.validate_image(content['image'])
                     content['image_format'] = format_str
                     content['image_size'] = len(image_bytes)
+                    content['image_bytes'] = image_bytes  # store for embedding
                 
                 processed.append(content)
                 
@@ -338,37 +334,69 @@ class EmbeddingManager:
             Generated embeddings
         """
         # Group inputs by modality for efficient processing
-        text_inputs = []
-        text_indices = []
-        
-        # Currently only supporting text modality
-        # TODO: Add image and multimodal support
-        for i, input_data in enumerate(processed_inputs):
-            if input_data['modality'] in ['text', 'text_image']:
-                if 'text' in input_data:
-                    text_inputs.append(input_data['text'])
-                    text_indices.append(i)
-            elif input_data['modality'] == 'image':
-                raise NotImplementedError("Image-only embeddings not yet implemented")
-        
-        if not text_inputs:
-            raise ValueError("No valid text inputs found")
-        
-        # Generate text embeddings
-        if self.enable_dynamic_batching and len(text_inputs) > 1:
-            # Use dynamic batching
-            embeddings = await self._generate_with_batching(
-                text_inputs, model, input_type, normalize
-            )
-        else:
-            # Direct generation
-            embeddings = model.encode_texts(
-                text_inputs, input_type=input_type, normalize=normalize
-            )
-        
-        # TODO: Handle mixed modality cases
-        # For now, we only return text embeddings
-        return embeddings
+        enable_fake_image = os.getenv('ENABLE_FAKE_IMAGE_EMBEDDINGS','false').lower() == 'true'
+
+        # Split inputs
+        text_map = {}
+        image_map = {}
+        multimodal_indices = []
+        for idx, inp in enumerate(processed_inputs):
+            mod = inp['modality']
+            if mod in ('text','text_image') and 'text' in inp:
+                text_map[idx] = inp['text']
+            if mod in ('image','text_image') and 'image_bytes' in inp:
+                image_map[idx] = inp['image_bytes']
+            if mod == 'text_image':
+                multimodal_indices.append(idx)
+
+        embeddings_text = None
+        if text_map:
+            ordered_texts = [text_map[i] for i in sorted(text_map.keys())]
+            if self.enable_dynamic_batching and len(ordered_texts) > 1:
+                embeddings_text = await self._generate_with_batching(ordered_texts, model, input_type, normalize)
+            else:
+                embeddings_text = model.encode_texts(ordered_texts, input_type=input_type, normalize=normalize)
+
+        # Image embeddings (fake deterministic if enabled)
+        embeddings_image = None
+        if image_map:
+            if not enable_fake_image:
+                raise ValueError("Image modality requested but ENABLE_FAKE_IMAGE_EMBEDDINGS not enabled")
+            dim = model.embedding_dimension
+            img_vecs = []
+            for i in sorted(image_map.keys()):
+                data = image_map[i]
+                h = hashlib.sha256(data).digest()
+                # Expand digest deterministically to required dimension
+                bytes_needed = dim * 4
+                rep = (h * (math.ceil(bytes_needed/len(h))))[:bytes_needed]
+                arr = np.frombuffer(rep, dtype=np.uint8).astype(np.float32)
+                arr = (arr - 127.5) / 127.5
+                arr = arr.reshape(-1)[:dim]
+                if normalize:
+                    norm = np.linalg.norm(arr) + 1e-9
+                    arr = arr / norm
+                img_vecs.append(arr)
+            embeddings_image = np.vstack(img_vecs)
+
+        # Merge per original order
+        result_rows = []
+        for i in range(len(processed_inputs)):
+            if i in multimodal_indices and embeddings_text is not None and embeddings_image is not None:
+                # Average fusion
+                t_idx = sorted(text_map.keys()).index(i)
+                im_idx = sorted(image_map.keys()).index(i)
+                fused = (embeddings_text[t_idx] + embeddings_image[im_idx]) / 2.0
+                result_rows.append(fused)
+            elif i in text_map and embeddings_text is not None:
+                t_idx = sorted(text_map.keys()).index(i)
+                result_rows.append(embeddings_text[t_idx])
+            elif i in image_map and embeddings_image is not None:
+                im_idx = sorted(image_map.keys()).index(i)
+                result_rows.append(embeddings_image[im_idx])
+            else:
+                raise ValueError(f"Cannot produce embedding for input index {i}")
+        return np.vstack(result_rows)
     
     async def _generate_with_batching(
         self,
@@ -428,13 +456,7 @@ class EmbeddingManager:
         
         return processed_embeddings
     
-    def _create_response(
-        self,
-        embeddings: np.ndarray,
-        model: str,
-        generation_time: float,
-        processed_inputs: List[Dict[str, Any]]
-    ) -> Dict[str, Any]:
+    def _create_response(self, embeddings: np.ndarray, model: str, generation_time: float, processed_inputs: List[Dict[str, Any]], current_model: Any, cache: bool) -> Dict[str, Any]:
         """Create API response.
         
         Args:
@@ -462,10 +484,13 @@ class EmbeddingManager:
             })
         
         # Calculate token usage (simplified)
-        total_tokens = sum(
-            len(input_data.get('text', '').split()) 
-            for input_data in processed_inputs
-        )
+        # Token usage via model tokenizer if available
+        raw_texts = [pi.get('text','') for pi in processed_inputs]
+        total_tokens = 0
+        try:
+            total_tokens = current_model.count_tokens(raw_texts)
+        except Exception:
+            total_tokens = sum(len(t.split()) for t in raw_texts)
         
         response = {
             "object": "list",
@@ -478,7 +503,8 @@ class EmbeddingManager:
             "metadata": {
                 "generation_time": generation_time,
                 "embedding_dimension": embeddings.shape[1] if len(embeddings.shape) > 1 else len(embeddings),
-                "num_embeddings": len(embeddings)
+                "num_embeddings": len(embeddings),
+                "cache": cache
             }
         }
         
@@ -488,43 +514,31 @@ class EmbeddingManager:
         """Main loop for dynamic batch processing."""
         while True:
             try:
-                # Collect requests for batching
-                requests = []
-                deadline = time.time() + (self.batch_timeout_ms / 1000.0)
-                
-                # Collect initial request
-                try:
-                    request = await asyncio.wait_for(
-                        self._request_queue.get(), 
-                        timeout=self.batch_timeout_ms / 1000.0
-                    )
-                    requests.append(request)
-                except asyncio.TimeoutError:
+                item = await self._request_queue.get()
+                if item is None:
                     continue
-                
-                # Collect additional requests until deadline or batch full
-                while len(requests) < self.max_batch_size and time.time() < deadline:
+                batch = [item]
+                deadline = item['enqueued_at'] + (self.batch_timeout_ms / 1000.0)
+                key = item['key']
+                # Drain queue for compatible items
+                while len(batch) < self.max_batch_size and time.time() < deadline:
                     try:
-                        remaining_time = deadline - time.time()
-                        if remaining_time <= 0:
+                        wait_remaining = max(0, deadline - time.time())
+                        nxt = await asyncio.wait_for(self._request_queue.get(), timeout=wait_remaining)
+                        if nxt['key'] == key:
+                            batch.append(nxt)
+                        else:
+                            # Put back if not matching key
+                            await self._request_queue.put(nxt)
                             break
-                        
-                        request = await asyncio.wait_for(
-                            self._request_queue.get(), 
-                            timeout=remaining_time
-                        )
-                        requests.append(request)
                     except asyncio.TimeoutError:
                         break
-                
                 # Process batch
-                if requests:
-                    await self._process_request_batch(requests)
-                    
+                await self._process_request_batch(batch)
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                self.logger.error(f"Error in batch processor: {str(e)}")
+                self.logger.error(f"Batch processor error: {e}")
     
     async def _process_request_batch(self, requests: List[Dict[str, Any]]):
         """Process a batch of requests.
@@ -532,15 +546,33 @@ class EmbeddingManager:
         Args:
             requests: List of request dictionaries
         """
-        # TODO: Implement proper batch processing
-        # For now, process requests individually
-        for request in requests:
-            try:
-                # Process individual request
-                response = await self.generate_embeddings(**request['params'])
-                request['future'].set_result(response)
-            except Exception as e:
-                request['future'].set_exception(e)
+        try:
+            if not requests:
+                return
+            # Combine all single-text inputs
+            first_params = requests[0]['params']
+            inputs = [r['params']['inputs'][0] for r in requests]
+            # Reuse generate logic but avoid recursion (call lower-level path)
+            model = first_params['model']
+            effective_input_type = first_params['input_type']
+            embedding_type = first_params['embedding_type']
+            dimensions = first_params['dimensions']
+            normalize = first_params['normalize']
+            modality = first_params['modality']
+            current_model = self.model_manager.get_current_model()
+            processed_inputs = self._preprocess_inputs(inputs, modality)
+            embeddings = await self._generate_embeddings_internal(processed_inputs, current_model, effective_input_type, normalize)
+            final_embeddings = self._postprocess_embeddings(embeddings, embedding_type, dimensions, current_model)
+            response = self._create_response(final_embeddings, model, 0.0, processed_inputs, current_model, cache=False)
+            # Dispatch each single embedding
+            for idx, req in enumerate(requests):
+                single_resp = response.copy()
+                single_resp['data'] = [response['data'][idx]]
+                req['future'].set_result(single_resp if not self.strict_mode else {k:v for k,v in single_resp.items() if k!='metadata'})
+        except Exception as e:
+            for req in requests:
+                if not req['future'].done():
+                    req['future'].set_exception(e)
     
     def get_stats(self) -> Dict[str, Any]:
         """Get embedding manager statistics.

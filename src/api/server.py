@@ -1,6 +1,7 @@
 """FastAPI server application for the embedding service."""
 
 import logging
+import os
 import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
@@ -9,6 +10,8 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 import uvicorn
+import time
+from collections import defaultdict
 
 from ..config_manager import ConfigManager
 from ..model_manager import ModelManager
@@ -151,10 +154,17 @@ def create_app() -> FastAPI:
                 "type": error["type"]
             })
         
+        logger.error(f"Validation error on {request.url.path}: {error_details}")
+        
+        # Format error message
+        error_messages = []
+        for e in error_details:
+            error_messages.append(f"{e['field']}: {e['message']}")
+        
         return JSONResponse(
             status_code=422,
             content=create_error_response(
-                message="Request validation failed",
+                message=f"Request validation failed: {'; '.join(error_messages)}",
                 error_type="validation_error"
             ).dict()
         )
@@ -170,6 +180,8 @@ def create_app() -> FastAPI:
                 error_type="internal_error"
             ).dict()
         )
+    
+    # Wrap validation for standardized error format already handled; ensure all non-handled paths include 'error'
     
     # Add middleware to check service readiness
     @app.middleware("http")
@@ -193,6 +205,36 @@ def create_app() -> FastAPI:
         
         response = await call_next(request)
         return response
+
+    # API Key + simple rate limit (per-IP) middleware
+    API_KEY = os.getenv('EMBEDDING_API_KEY')
+    RATE_LIMIT = int(os.getenv('RATE_LIMIT_PER_MINUTE', '100'))
+    rl_counters = defaultdict(lambda: {'count':0,'reset':time.time()+60})
+
+    @app.middleware("http")
+    async def auth_and_rate_limit(request: Request, call_next):
+        path = request.url.path
+        if path.startswith('/v1/health') or path in ('/','/docs','/openapi.json','/redoc'):  # exempt
+            return await call_next(request)
+        # API Key check
+        if API_KEY:
+            auth_header = request.headers.get('authorization') or request.headers.get('Authorization')
+            if not auth_header or not auth_header.lower().startswith('bearer '):
+                return JSONResponse(status_code=401, content=create_error_response('Missing bearer token','unauthorized').dict())
+            token = auth_header.split(' ',1)[1].strip()
+            if token != API_KEY:
+                return JSONResponse(status_code=403, content=create_error_response('Invalid API key','forbidden').dict())
+        # Rate limit per client IP
+        client_ip = request.client.host if request.client else 'unknown'
+        bucket = rl_counters[client_ip]
+        now = time.time()
+        if now > bucket['reset']:
+            bucket['count'] = 0
+            bucket['reset'] = now + 60
+        bucket['count'] += 1
+        if bucket['count'] > RATE_LIMIT:
+            return JSONResponse(status_code=429, content=create_error_response('Rate limit exceeded','rate_limit_exceeded', code='rate_limit').dict())
+        return await call_next(request)
     
     # Root endpoint
     @app.get("/")

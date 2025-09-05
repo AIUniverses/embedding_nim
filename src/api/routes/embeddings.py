@@ -43,6 +43,9 @@ if PROMETHEUS_AVAILABLE:
 def track_metrics(endpoint: str, method: str = "POST"):
     """Decorator to track API metrics."""
     def decorator(func):
+        from functools import wraps
+        
+        @wraps(func)
         async def wrapper(*args, **kwargs):
             start_time = time.time()
             status = "success"

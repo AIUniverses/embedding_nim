@@ -2,7 +2,8 @@
 
 import logging
 import torch
-from typing import Dict, Any, Optional, Type
+import asyncio
+from typing import Dict, Any, Optional, Type, List
 from pathlib import Path
 
 from .config_manager import ConfigManager
@@ -36,7 +37,9 @@ class ModelManager:
         self.current_model: Optional[BaseEmbeddingModel] = None
         self.current_model_name: Optional[str] = None
         self.logger = logging.getLogger(__name__)
-        
+        # Concurrency lock for model (re)loads
+        self._model_lock = asyncio.Lock()
+
         # Device management with CUDA error handling
         if torch.cuda.is_available():
             try:
@@ -52,7 +55,7 @@ class ModelManager:
             self.device = 'cpu'
             self.logger.info("CUDA not available, using CPU for inference")
     
-    def load_model(self, model_name: str) -> bool:
+    async def load_model_async(self, model_name: str) -> bool:
         """Load a specific model.
         
         Args:
@@ -62,42 +65,43 @@ class ModelManager:
             True if successful, False otherwise
         """
         try:
-            # Parse model name to handle -query/-passage suffixes
-            base_model_name, _ = self.config_manager.parse_model_name(model_name)
+            async with self._model_lock:
+                # Parse model name to handle -query/-passage suffixes
+                base_model_name, _ = self.config_manager.parse_model_name(model_name)
             
-            # If same model is already loaded, return success
-            if self.current_model_name == base_model_name and self.current_model and self.current_model.is_loaded:
-                self.logger.info(f"Model {base_model_name} already loaded")
-                return True
+                # If same model is already loaded, return success
+                if self.current_model_name == base_model_name and self.current_model and self.current_model.is_loaded:
+                    self.logger.info(f"Model {base_model_name} already loaded")
+                    return True
             
-            # Unload current model if any
-            if self.current_model:
-                self.unload_model()
+                # Unload current model if any
+                if self.current_model:
+                    self.unload_model()
             
-            # Get model configuration
-            model_config = self.config_manager.get_model_config(base_model_name)
-            family = model_config['family']
+                # Get model configuration
+                model_config = self.config_manager.get_model_config(base_model_name)
+                family = model_config['family']
             
-            # Get model class
-            if family not in self.MODEL_FAMILIES:
-                available_families = ', '.join(self.MODEL_FAMILIES.keys())
-                raise ValueError(f"Unsupported model family '{family}'. Available: {available_families}")
+                # Get model class
+                if family not in self.MODEL_FAMILIES:
+                    available_families = ', '.join(self.MODEL_FAMILIES.keys())
+                    raise ValueError(f"Unsupported model family '{family}'. Available: {available_families}")
             
-            model_class = self.MODEL_FAMILIES[family]
+                model_class = self.MODEL_FAMILIES[family]
             
-            # Create and load model
-            self.logger.info(f"Loading model {base_model_name} (family: {family})")
-            self.current_model = model_class(model_config)
+                # Create and load model
+                self.logger.info(f"Loading model {base_model_name} (family: {family})")
+                self.current_model = model_class(model_config)
             
-            if self.current_model.load_model():
-                self.current_model_name = base_model_name
-                self.logger.info(f"Model {base_model_name} loaded successfully")
-                return True
-            else:
-                self.current_model = None
-                self.current_model_name = None
-                self.logger.error(f"Failed to load model {base_model_name}")
-                return False
+                if self.current_model.load_model():
+                    self.current_model_name = base_model_name
+                    self.logger.info(f"Model {base_model_name} loaded successfully")
+                    return True
+                else:
+                    self.current_model = None
+                    self.current_model_name = None
+                    self.logger.error(f"Failed to load model {base_model_name}")
+                    return False
                 
         except Exception as e:
             self.logger.error(f"Error loading model {model_name}: {str(e)}")
@@ -243,6 +247,16 @@ class ModelManager:
                 effective_input_type = None
         
         return base_model_name, effective_input_type
+
+    async def ensure_model_loaded_async(self, model_name: str) -> bool:
+        base_model_name, _ = self.config_manager.parse_model_name(model_name)
+        if not self.is_model_loaded(base_model_name):
+            return await self.load_model_async(base_model_name)
+        return True
+
+    def get_loaded_models(self) -> List[str]:
+        """Return list of currently resident models (only one in current design)."""
+        return [self.current_model_name] if self.current_model_name else []
     
     def ensure_model_loaded(self, model_name: str) -> bool:
         """Ensure a specific model is loaded.
