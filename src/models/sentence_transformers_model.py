@@ -56,7 +56,8 @@ class SentenceTransformersModel(BaseEmbeddingModel):
             return True
             
         except Exception as e:
-            self.logger.error(f"Failed to load Sentence Transformers model {self.model_id}: {str(e)}")
+            self.logger.error(f"Failed to load Sentence Transformers model {self.model_id}: {str(e)}", exc_info=True)
+            self.load_error = f"{type(e).__name__}: {e}"
             return False
     
     def unload_model(self) -> None:
@@ -73,7 +74,7 @@ class SentenceTransformersModel(BaseEmbeddingModel):
             self.logger.info(f"Sentence Transformers model {self.model_id} unloaded")
             
         except Exception as e:
-            self.logger.error(f"Error unloading Sentence Transformers model: {str(e)}")
+            self.logger.error(f"Error unloading Sentence Transformers model: {str(e)}", exc_info=True)
     
     def preprocess_text(self, text: str, input_type: Optional[str] = None) -> str:
         """Preprocess text for Sentence Transformers models.
@@ -133,7 +134,7 @@ class SentenceTransformersModel(BaseEmbeddingModel):
             return embeddings
             
         except Exception as e:
-            self.logger.error(f"Error encoding texts with Sentence Transformers model: {str(e)}")
+            self.logger.error(f"Error encoding texts with Sentence Transformers model: {str(e)}", exc_info=True)
             raise
     
     def get_model_info(self) -> Dict[str, Any]:

@@ -169,7 +169,7 @@ class ImagePreprocessor:
         try:
             image_bytes = base64.b64decode(base64_data)
         except Exception as e:
-            raise PreprocessingError(f"Invalid base64 encoding: {e}")
+            raise PreprocessingError(f"Invalid base64 encoding: {e}") from e
         
         # Check file size
         if len(image_bytes) > self.max_file_size:
@@ -226,7 +226,7 @@ class ImagePreprocessor:
         except PreprocessingError:
             raise
         except Exception as e:
-            raise PreprocessingError(f"Invalid image data: {e}")
+            raise PreprocessingError(f"Invalid image data: {e}") from e
         
         return format_str, image_bytes
     

@@ -84,7 +84,8 @@ class NVEmbedModel(BaseEmbeddingModel):
             return True
             
         except Exception as e:
-            self.logger.error(f"Failed to load NV-Embed model {self.model_id}: {str(e)}")
+            self.logger.error(f"Failed to load NV-Embed model {self.model_id}: {str(e)}", exc_info=True)
+            self.load_error = f"{type(e).__name__}: {e}"
             return False
     
     def unload_model(self) -> None:
@@ -105,7 +106,7 @@ class NVEmbedModel(BaseEmbeddingModel):
             self.logger.info(f"NV-Embed model {self.model_id} unloaded")
             
         except Exception as e:
-            self.logger.error(f"Error unloading NV-Embed model: {str(e)}")
+            self.logger.error(f"Error unloading NV-Embed model: {str(e)}", exc_info=True)
     
     def preprocess_text(self, text: str, input_type: Optional[str] = None) -> str:
         """Preprocess text with NV-Embed specific prefixes.
@@ -183,7 +184,7 @@ class NVEmbedModel(BaseEmbeddingModel):
             return embeddings
             
         except Exception as e:
-            self.logger.error(f"Error encoding texts with NV-Embed model: {str(e)}")
+            self.logger.error(f"Error encoding texts with NV-Embed model: {str(e)}", exc_info=True)
             raise
     
     def _encode_with_transformers(

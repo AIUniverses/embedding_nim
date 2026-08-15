@@ -39,6 +39,8 @@ class ModelManager:
         self.logger = logging.getLogger(__name__)
         # Concurrency lock for model (re)loads
         self._model_lock = asyncio.Lock()
+        # Reason of the most recent load failure, surfaced to callers/clients
+        self._last_load_error: Optional[str] = None
 
         # Device management with CUDA error handling
         if torch.cuda.is_available():
@@ -55,59 +57,105 @@ class ModelManager:
             self.device = 'cpu'
             self.logger.info("CUDA not available, using CPU for inference")
     
-    async def load_model_async(self, model_name: str) -> bool:
-        """Load a specific model.
-        
+    def _load_model_unlocked(self, model_name: str) -> bool:
+        """Load a model without acquiring the load lock.
+
         Args:
             model_name: Name of the model to load
-            
+
+        Returns:
+            True if successful, False otherwise
+
+        Raises:
+            KeyError: If the model is not present in the configuration
+            ValueError: If the model family is unsupported
+        """
+        # Parse model name to handle -query/-passage suffixes
+        base_model_name, _ = self.config_manager.parse_model_name(model_name)
+
+        # If same model is already loaded, return success
+        if self.current_model_name == base_model_name and self.current_model and self.current_model.is_loaded:
+            self.logger.info(f"Model {base_model_name} already loaded")
+            return True
+
+        # Unload current model if any
+        if self.current_model:
+            self.unload_model()
+
+        # Get model configuration
+        model_config = self.config_manager.get_model_config(base_model_name)
+        family = model_config['family']
+
+        # Get model class
+        if family not in self.MODEL_FAMILIES:
+            available_families = ', '.join(self.MODEL_FAMILIES.keys())
+            raise ValueError(f"Unsupported model family '{family}'. Available: {available_families}")
+
+        model_class = self.MODEL_FAMILIES[family]
+
+        # Create and load model
+        self.logger.info(f"Loading model {base_model_name} (family: {family})")
+        self.current_model = model_class(model_config)
+
+        if self.current_model.load_model():
+            self.current_model_name = base_model_name
+            self._last_load_error = None
+            self.logger.info(f"Model {base_model_name} loaded successfully")
+            return True
+
+        reason = getattr(self.current_model, 'load_error', None) or 'see service logs for details'
+        self.current_model = None
+        self.current_model_name = None
+        self._last_load_error = f"Model '{base_model_name}' failed to load: {reason}"
+        self.logger.error(f"Failed to load model {base_model_name}: {reason}")
+        return False
+
+    def load_model(self, model_name: str) -> bool:
+        """Load a specific model.
+
+        Args:
+            model_name: Name of the model to load
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            return self._load_model_unlocked(model_name)
+        except Exception as e:
+            self._record_load_failure(model_name, e)
+            return False
+
+    async def load_model_async(self, model_name: str) -> bool:
+        """Load a specific model, serializing concurrent loads.
+
+        Args:
+            model_name: Name of the model to load
+
         Returns:
             True if successful, False otherwise
         """
         try:
             async with self._model_lock:
-                # Parse model name to handle -query/-passage suffixes
-                base_model_name, _ = self.config_manager.parse_model_name(model_name)
-            
-                # If same model is already loaded, return success
-                if self.current_model_name == base_model_name and self.current_model and self.current_model.is_loaded:
-                    self.logger.info(f"Model {base_model_name} already loaded")
-                    return True
-            
-                # Unload current model if any
-                if self.current_model:
-                    self.unload_model()
-            
-                # Get model configuration
-                model_config = self.config_manager.get_model_config(base_model_name)
-                family = model_config['family']
-            
-                # Get model class
-                if family not in self.MODEL_FAMILIES:
-                    available_families = ', '.join(self.MODEL_FAMILIES.keys())
-                    raise ValueError(f"Unsupported model family '{family}'. Available: {available_families}")
-            
-                model_class = self.MODEL_FAMILIES[family]
-            
-                # Create and load model
-                self.logger.info(f"Loading model {base_model_name} (family: {family})")
-                self.current_model = model_class(model_config)
-            
-                if self.current_model.load_model():
-                    self.current_model_name = base_model_name
-                    self.logger.info(f"Model {base_model_name} loaded successfully")
-                    return True
-                else:
-                    self.current_model = None
-                    self.current_model_name = None
-                    self.logger.error(f"Failed to load model {base_model_name}")
-                    return False
-                
+                return self._load_model_unlocked(model_name)
         except Exception as e:
-            self.logger.error(f"Error loading model {model_name}: {str(e)}")
-            self.current_model = None
-            self.current_model_name = None
+            self._record_load_failure(model_name, e)
             return False
+
+    def _record_load_failure(self, model_name: str, error: Exception) -> None:
+        """Log a load failure and remember its cause for later reporting."""
+        self.logger.error(f"Error loading model {model_name}: {error}", exc_info=True)
+        self._last_load_error = f"{type(error).__name__}: {error}"
+        self.current_model = None
+        self.current_model_name = None
+
+    def get_last_load_error(self) -> Optional[str]:
+        """Get the cause of the most recent model load failure, if any."""
+        return self._last_load_error
+
+    async def shutdown(self) -> None:
+        """Release model resources held by the manager."""
+        async with self._model_lock:
+            self.unload_model()
     
     def unload_model(self) -> None:
         """Unload the current model."""
@@ -116,7 +164,7 @@ class ModelManager:
                 self.current_model.unload_model()
                 self.logger.info(f"Model {self.current_model_name} unloaded")
             except Exception as e:
-                self.logger.error(f"Error unloading model: {str(e)}")
+                self.logger.error(f"Error unloading model: {e}", exc_info=True)
             finally:
                 self.current_model = None
                 self.current_model_name = None
@@ -197,7 +245,8 @@ class ModelManager:
                 
                 return info
                 
-            except KeyError:
+            except KeyError as e:
+                self.logger.warning(f"Model info requested for unknown model {model_name}: {e}")
                 return {
                     'error': f'Model {model_name} not found',
                     'available_models': list(self.config_manager.get_available_models().keys())
@@ -302,5 +351,9 @@ class ModelManager:
         """Cleanup when manager is destroyed."""
         try:
             self.unload_model()
-        except Exception:
-            pass  # Ignore errors during cleanup
+        except Exception as e:
+            # Interpreter shutdown can make logging unavailable; never raise from __del__
+            try:
+                self.logger.debug(f"Error unloading model during cleanup: {e}")
+            except Exception:
+                pass

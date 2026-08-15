@@ -56,7 +56,7 @@ def track_metrics(endpoint: str, method: str = "POST"):
             except HTTPException as e:
                 status = f"error_{e.status_code}"
                 raise
-            except Exception as e:
+            except Exception:
                 status = "error_500"
                 raise
             finally:
@@ -139,20 +139,24 @@ async def create_embeddings(request: EmbeddingRequest, http_request: Request):
             return EmbeddingResponse(**response)
             
         except ValueError as e:
-            logger.error(f"[{request_id}] Validation error: {str(e)}")
-            raise HTTPException(status_code=400, detail=str(e))
+            logger.error(f"[{request_id}] Validation error: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=400, detail=str(e)) from e
         except RuntimeError as e:
-            logger.error(f"[{request_id}] Runtime error: {str(e)}")
-            raise HTTPException(status_code=500, detail=str(e))
+            logger.error(f"[{request_id}] Runtime error: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e)) from e
         except Exception as e:
-            logger.error(f"[{request_id}] Unexpected error: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+            logger.error(f"[{request_id}] Unexpected error: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}") from e
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"[{request_id}] Error in create_embeddings endpoint: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        logger.error(
+            f"[{request_id}] Error in create_embeddings endpoint: {str(e)}", exc_info=True
+        )
+        raise HTTPException(
+            status_code=500, detail=f"Internal server error: {str(e)}"
+        ) from e
 
 
 @router.websocket("/v1/embeddings/stream")
@@ -213,7 +217,11 @@ async def streaming_embeddings(websocket: WebSocket):
                     await websocket.send_json(response)
                     
                 except Exception as e:
-                    # Send error response
+                    # Report the failure to the client, but keep the traceback in logs
+                    logger.error(
+                        f"[{request_id}] Streaming embedding generation failed: {e}",
+                        exc_info=True
+                    )
                     await websocket.send_json({
                         "status": "error",
                         "request_id": request_id,
@@ -224,19 +232,20 @@ async def streaming_embeddings(websocket: WebSocket):
                 logger.info("WebSocket client disconnected")
                 break
             except Exception as e:
-                logger.error(f"WebSocket error: {str(e)}")
+                logger.error(f"WebSocket error: {str(e)}", exc_info=True)
                 await websocket.send_json({
                     "status": "error",
                     "error": f"Processing error: {str(e)}"
                 })
                 
     except Exception as e:
-        logger.error(f"WebSocket handler error: {str(e)}")
+        logger.error(f"WebSocket handler error: {str(e)}", exc_info=True)
     finally:
         try:
             await websocket.close()
-        except:
-            pass
+        except Exception as e:
+            # Closing an already-closed socket is expected; anything else is worth logging
+            logger.debug(f"WebSocket close failed: {e}")
 
 
 @router.post("/v1/embeddings/batch", response_model=List[EmbeddingResponse])
@@ -298,7 +307,9 @@ async def create_embeddings_batch(requests: List[EmbeddingRequest], http_request
                 responses.append(EmbeddingResponse(**response))
                 
             except Exception as e:
-                logger.error(f"[{request_id}] Error processing request: {str(e)}")
+                logger.error(
+                    f"[{request_id}] Error processing request: {str(e)}", exc_info=True
+                )
                 # Add error response for this request
                 error_response = EmbeddingResponse(
                     object="error",
@@ -317,8 +328,10 @@ async def create_embeddings_batch(requests: List[EmbeddingRequest], http_request
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"[{batch_id}] Batch processing error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Batch processing error: {str(e)}")
+        logger.error(f"[{batch_id}] Batch processing error: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500, detail=f"Batch processing error: {str(e)}"
+        ) from e
 
 
 @router.get("/v1/embeddings/metrics")
@@ -345,9 +358,11 @@ async def get_embedding_metrics(http_request: Request):
             "service_status": "healthy"
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error getting metrics: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error getting metrics: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 async def _validate_request(request: EmbeddingRequest, config_manager) -> None:
@@ -436,8 +451,10 @@ async def _validate_request(request: EmbeddingRequest, config_manager) -> None:
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Validation error: {str(e)}")
-        raise HTTPException(status_code=400, detail=f"Request validation failed: {str(e)}")
+        logger.error(f"Validation error: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=400, detail=f"Request validation failed: {str(e)}"
+        ) from e
 
 
 @router.post("/embeddings", response_model=EmbeddingResponse)
@@ -464,6 +481,7 @@ async def list_embedding_models(http_request: Request):
         
         available_models = config_manager.get_available_models()
         detailed_models = []
+        failed_models = []
         
         for model_name in available_models.keys():
             try:
@@ -486,17 +504,22 @@ async def list_embedding_models(http_request: Request):
                 detailed_models.append(detailed_info)
                 
             except Exception as e:
-                logger.warning(f"Failed to get info for model {model_name}: {str(e)}")
-                continue
+                logger.error(
+                    f"Failed to get info for model {model_name}: {str(e)}", exc_info=True
+                )
+                failed_models.append({"id": model_name, "error": str(e)})
         
         return {
             "object": "list",
             "data": detailed_models,
-            "total": len(detailed_models)
+            "total": len(detailed_models),
+            "failed": failed_models
         }
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error listing embedding models: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to list embedding models: {str(e)}")
+        logger.error(f"Error listing embedding models: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500, detail=f"Failed to list embedding models: {str(e)}"
+        ) from e

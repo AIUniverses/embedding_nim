@@ -1,9 +1,12 @@
 """Base model interface for embedding models."""
 
+import logging
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional, Union
 import torch
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 class BaseEmbeddingModel(ABC):
@@ -32,6 +35,8 @@ class BaseEmbeddingModel(ABC):
         self.model = None
         self.tokenizer = None
         self.is_loaded = False
+        # Reason of the most recent load failure, surfaced by the model manager
+        self.load_error: Optional[str] = None
         
     @abstractmethod
     def load_model(self) -> bool:
@@ -176,27 +181,33 @@ class BaseEmbeddingModel(ABC):
         else:
             return embeddings.astype(np.float32)
 
-        # -------------------- Added utility methods --------------------
-        def count_tokens(self, texts: List[str]) -> int:
-            """Approximate token count for usage metrics.
-            Prefers the tokenizer if available; falls back to whitespace split.
-            Args:
-                texts: list of raw (already prefix-processed) texts
-            Returns:
-                total token count (int)
-            """
-            if hasattr(self, 'tokenizer') and self.tokenizer is not None:
-                try:
-                    # HuggingFace tokenizers support batching
-                    enc = self.tokenizer(texts, truncation=False, add_special_tokens=True)
-                    if 'input_ids' in enc:
-                        if isinstance(enc['input_ids'][0], list):
-                            return sum(len(ids) for ids in enc['input_ids'])
-                        return len(enc['input_ids'])
-                except Exception:
-                    pass
-            # Fallback simple heuristic
-            return sum(len(t.strip().split()) for t in texts)
+    def count_tokens(self, texts: List[str]) -> int:
+        """Approximate token count for usage metrics.
+
+        Prefers the tokenizer if available; falls back to whitespace split.
+
+        Args:
+            texts: list of raw (already prefix-processed) texts
+
+        Returns:
+            total token count (int)
+        """
+        if getattr(self, 'tokenizer', None) is not None:
+            try:
+                # HuggingFace tokenizers support batching
+                enc = self.tokenizer(texts, truncation=False, add_special_tokens=True)
+                if 'input_ids' in enc:
+                    if isinstance(enc['input_ids'][0], list):
+                        return sum(len(ids) for ids in enc['input_ids'])
+                    return len(enc['input_ids'])
+            except Exception as e:
+                logger.warning(
+                    f"Tokenizer-based token count failed for {self.model_id}, "
+                    f"falling back to whitespace count: {e}",
+                    exc_info=True
+                )
+        # Fallback simple heuristic
+        return sum(len(t.strip().split()) for t in texts)
     
     def _convert_to_int8(self, embeddings: np.ndarray) -> np.ndarray:
         """Convert float embeddings to int8."""
@@ -311,5 +322,9 @@ class BaseEmbeddingModel(ABC):
         if hasattr(self, 'is_loaded') and self.is_loaded:
             try:
                 self.unload_model()
-            except Exception:
-                pass  # Ignore errors during cleanup
+            except Exception as e:
+                # Interpreter shutdown can make logging unavailable; never raise from __del__
+                try:
+                    logger.debug(f"Error unloading model during cleanup: {e}")
+                except Exception:
+                    pass

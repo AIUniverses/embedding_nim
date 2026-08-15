@@ -147,10 +147,10 @@ class RedisCache(CacheBackend):
         self.redis_url = redis_url
         self.default_ttl = ttl
         self.compression = compression
-        self.redis: Optional[aioredis.Redis] = None
+        self.redis: Optional["aioredis.Redis"] = None
         self.logger = logging.getLogger(__name__)
     
-    async def _get_redis(self) -> aioredis.Redis:
+    async def _get_redis(self) -> "aioredis.Redis":
         """Get Redis connection."""
         if self.redis is None:
             self.redis = aioredis.from_url(self.redis_url)
@@ -158,75 +158,56 @@ class RedisCache(CacheBackend):
     
     async def get(self, key: str) -> Optional[Any]:
         """Get value from Redis cache."""
-        try:
-            redis = await self._get_redis()
-            data = await redis.get(key)
-            
-            if data is None:
-                return None
-            
-            # Deserialize data
-            value = pickle.loads(data)
-            
-            # Update access statistics
-            await redis.hincrby(f"{key}:stats", "access_count", 1)
-            await redis.hset(f"{key}:stats", "last_accessed", time.time())
-            
-            return value
-            
-        except Exception as e:
-            self.logger.error(f"Redis get error: {e}")
+        redis = await self._get_redis()
+        data = await redis.get(key)
+        
+        if data is None:
             return None
+        
+        # Deserialize data
+        value = pickle.loads(data)
+        
+        # Update access statistics
+        await redis.hincrby(f"{key}:stats", "access_count", 1)
+        await redis.hset(f"{key}:stats", "last_accessed", time.time())
+        
+        return value
     
     async def set(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
         """Set value in Redis cache."""
-        try:
-            redis = await self._get_redis()
-            
-            # Serialize data
-            data = pickle.dumps(value)
-            
-            # Set with TTL
-            ttl_seconds = ttl or self.default_ttl
-            await redis.setex(key, ttl_seconds, data)
-            
-            # Set statistics
-            stats = {
-                "created_at": time.time(),
-                "last_accessed": time.time(),
-                "access_count": 0
-            }
-            await redis.hset(f"{key}:stats", mapping=stats)
-            await redis.expire(f"{key}:stats", ttl_seconds)
-            
-        except Exception as e:
-            self.logger.error(f"Redis set error: {e}")
+        redis = await self._get_redis()
+        
+        # Serialize data
+        data = pickle.dumps(value)
+        
+        # Set with TTL
+        ttl_seconds = ttl or self.default_ttl
+        await redis.setex(key, ttl_seconds, data)
+        
+        # Set statistics
+        stats = {
+            "created_at": time.time(),
+            "last_accessed": time.time(),
+            "access_count": 0
+        }
+        await redis.hset(f"{key}:stats", mapping=stats)
+        await redis.expire(f"{key}:stats", ttl_seconds)
     
     async def delete(self, key: str) -> None:
         """Delete key from Redis cache."""
-        try:
-            redis = await self._get_redis()
-            await redis.delete(key)
-            await redis.delete(f"{key}:stats")
-        except Exception as e:
-            self.logger.error(f"Redis delete error: {e}")
+        redis = await self._get_redis()
+        await redis.delete(key)
+        await redis.delete(f"{key}:stats")
     
     async def clear(self) -> None:
         """Clear all cache entries."""
-        try:
-            redis = await self._get_redis()
-            await redis.flushdb()
-        except Exception as e:
-            self.logger.error(f"Redis clear error: {e}")
+        redis = await self._get_redis()
+        await redis.flushdb()
     
     async def exists(self, key: str) -> bool:
         """Check if key exists in Redis cache."""
-        try:
-            redis = await self._get_redis()
-            return bool(await redis.exists(key))
-        except Exception as e:
-            self.logger.error(f"Redis exists error: {e}")
-            return False
+        redis = await self._get_redis()
+        return bool(await redis.exists(key))
 
 
 class DiskCache(CacheBackend):
@@ -242,41 +223,24 @@ class DiskCache(CacheBackend):
     
     async def get(self, key: str) -> Optional[Any]:
         """Get value from disk cache."""
-        try:
-            return self.cache.get(key)
-        except Exception as e:
-            self.logger.error(f"Disk cache get error: {e}")
-            return None
+        return self.cache.get(key)
     
     async def set(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
         """Set value in disk cache."""
-        try:
-            expire_time = time.time() + (ttl or self.default_ttl)
-            self.cache.set(key, value, expire=expire_time)
-        except Exception as e:
-            self.logger.error(f"Disk cache set error: {e}")
+        expire_time = time.time() + (ttl or self.default_ttl)
+        self.cache.set(key, value, expire=expire_time)
     
     async def delete(self, key: str) -> None:
         """Delete key from disk cache."""
-        try:
-            self.cache.delete(key)
-        except Exception as e:
-            self.logger.error(f"Disk cache delete error: {e}")
+        self.cache.delete(key)
     
     async def clear(self) -> None:
         """Clear all cache entries."""
-        try:
-            self.cache.clear()
-        except Exception as e:
-            self.logger.error(f"Disk cache clear error: {e}")
+        self.cache.clear()
     
     async def exists(self, key: str) -> bool:
         """Check if key exists in disk cache."""
-        try:
-            return key in self.cache
-        except Exception as e:
-            self.logger.error(f"Disk cache exists error: {e}")
-            return False
+        return key in self.cache
 
 
 class EmbeddingCache:
@@ -326,7 +290,10 @@ class EmbeddingCache:
                 
         except Exception as e:
             self.error_count += 1
-            self.logger.error(f"Cache get error: {e}")
+            self.miss_count += 1
+            self.logger.error(
+                f"Cache lookup failed, treating as miss: {e}", exc_info=True
+            )
             return None
     
     async def set_embeddings(
@@ -345,7 +312,9 @@ class EmbeddingCache:
             
         except Exception as e:
             self.error_count += 1
-            self.logger.error(f"Cache set error: {e}")
+            self.logger.error(
+                f"Cache store failed, results were not cached: {e}", exc_info=True
+            )
     
     async def invalidate_model(self, model: str) -> None:
         """Invalidate all cache entries for a specific model."""

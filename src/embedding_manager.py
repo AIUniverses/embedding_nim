@@ -83,7 +83,9 @@ class EmbeddingManager:
                 self.cache = create_embedding_cache(self.config_manager)
                 self.logger.info(f"Caching enabled ({self.config_manager.get_cache_backend()})")
             except Exception as e:
-                self.logger.error(f"Cache init failed: {e}")
+                self.logger.error(
+                    f"Cache init failed, continuing without cache: {e}", exc_info=True
+                )
 
         # Batching
         self.max_batch_size = self.config_manager.get_max_batch_size()
@@ -131,20 +133,6 @@ class EmbeddingManager:
             self.batch_size_histogram = DummyMetric()
             self.queue_size_gauge = DummyMetric()
 
-    async def start_batch_processor(self):
-        if self.enable_dynamic_batching and self._batch_processor_task is None:
-            self._batch_processor_task = asyncio.create_task(self._batch_processor_loop())
-            self.logger.info("Batch processor started")
-
-    async def stop_batch_processor(self):
-        if self._batch_processor_task:
-            self._batch_processor_task.cancel()
-            try:
-                await self._batch_processor_task
-            except asyncio.CancelledError:
-                pass
-            self._batch_processor_task = None
-
     async def generate_embeddings(self, inputs: List[Union[str, Dict[str, Any]]], model: str, input_type: Optional[str] = None, modality: Optional[Union[str, List[str]]] = None, embedding_type: str = 'float', dimensions: Optional[int] = None, normalize: bool = True) -> Dict[str, Any]:
         start_time = time.time()
         self._processing_stats['total_requests'] += 1
@@ -152,8 +140,14 @@ class EmbeddingManager:
             # Normalize model & input_type
             normalized_model, effective_input_type = self.model_manager.validate_model_request(model, input_type)
             # Ensure model loaded (async)
-            await self.model_manager.ensure_model_loaded_async(normalized_model) if hasattr(self.model_manager,'ensure_model_loaded_async') else self.model_manager.ensure_model_loaded(normalized_model)
+            if hasattr(self.model_manager, 'ensure_model_loaded_async'):
+                loaded = await self.model_manager.ensure_model_loaded_async(normalized_model)
+            else:
+                loaded = self.model_manager.ensure_model_loaded(normalized_model)
             current_model = self.model_manager.get_current_model()
+            if not loaded or current_model is None:
+                reason = self.model_manager.get_last_load_error() or 'unknown error'
+                raise RuntimeError(f"Model '{normalized_model}' is not available: {reason}")
             current_model.validate_embedding_type(embedding_type)
 
             # Cross-request dynamic batching only when single text input and enabled
@@ -227,7 +221,7 @@ class EmbeddingManager:
         except Exception as e:
             if PROMETHEUS_AVAILABLE:
                 self.request_counter.labels(model=model, status='error').inc()
-            self.logger.error(f"Embedding generation failed: {e}")
+            self.logger.error(f"Embedding generation failed: {e}", exc_info=True)
             raise
         
     async def start_batch_processor(self):
@@ -245,7 +239,20 @@ class EmbeddingManager:
             except asyncio.CancelledError:
                 pass
             self._batch_processor_task = None
+            self._drain_queue(RuntimeError("Batch processor stopped before request was processed"))
             self.logger.info("Dynamic batch processor stopped")
+
+    def _drain_queue(self, error: BaseException) -> None:
+        """Fail every queued request so no caller waits on a dead processor."""
+        if not self._request_queue:
+            return
+        pending = []
+        while True:
+            try:
+                pending.append(self._request_queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        self._fail_pending(pending, error)
     
     # (old generate_embeddings removed – unified version above)
     
@@ -309,9 +316,12 @@ class EmbeddingManager:
                 processed.append(content)
                 
             except PreprocessingError as e:
-                raise ValueError(f"Input {i}: {str(e)}")
+                raise ValueError(f"Input {i}: {e}") from e
+            except ValueError as e:
+                raise ValueError(f"Input {i}: {e}") from e
             except Exception as e:
-                raise ValueError(f"Input {i}: Preprocessing failed - {str(e)}")
+                self.logger.error(f"Preprocessing failed for input {i}: {e}", exc_info=True)
+                raise ValueError(f"Input {i}: Preprocessing failed - {type(e).__name__}: {e}") from e
         
         return processed
     
@@ -486,10 +496,12 @@ class EmbeddingManager:
         # Calculate token usage (simplified)
         # Token usage via model tokenizer if available
         raw_texts = [pi.get('text','') for pi in processed_inputs]
-        total_tokens = 0
         try:
             total_tokens = current_model.count_tokens(raw_texts)
-        except Exception:
+        except Exception as e:
+            self.logger.warning(
+                f"Token counting failed, falling back to whitespace count: {e}", exc_info=True
+            )
             total_tokens = sum(len(t.split()) for t in raw_texts)
         
         response = {
@@ -513,6 +525,7 @@ class EmbeddingManager:
     async def _batch_processor_loop(self):
         """Main loop for dynamic batch processing."""
         while True:
+            batch: List[Dict[str, Any]] = []
             try:
                 item = await self._request_queue.get()
                 if item is None:
@@ -536,9 +549,12 @@ class EmbeddingManager:
                 # Process batch
                 await self._process_request_batch(batch)
             except asyncio.CancelledError:
-                break
+                self._fail_pending(batch, asyncio.CancelledError("Batch processor stopped"))
+                raise
             except Exception as e:
-                self.logger.error(f"Batch processor error: {e}")
+                self.logger.error(f"Batch processor error: {e}", exc_info=True)
+                # Never leave callers waiting on a future this loop will no longer complete
+                self._fail_pending(batch, e)
     
     async def _process_request_batch(self, requests: List[Dict[str, Any]]):
         """Process a batch of requests.
@@ -560,6 +576,9 @@ class EmbeddingManager:
             normalize = first_params['normalize']
             modality = first_params['modality']
             current_model = self.model_manager.get_current_model()
+            if current_model is None:
+                reason = self.model_manager.get_last_load_error() or 'no model loaded'
+                raise RuntimeError(f"Model '{model}' is not available: {reason}")
             processed_inputs = self._preprocess_inputs(inputs, modality)
             embeddings = await self._generate_embeddings_internal(processed_inputs, current_model, effective_input_type, normalize)
             final_embeddings = self._postprocess_embeddings(embeddings, embedding_type, dimensions, current_model)
@@ -570,9 +589,17 @@ class EmbeddingManager:
                 single_resp['data'] = [response['data'][idx]]
                 req['future'].set_result(single_resp if not self.strict_mode else {k:v for k,v in single_resp.items() if k!='metadata'})
         except Exception as e:
-            for req in requests:
-                if not req['future'].done():
-                    req['future'].set_exception(e)
+            self.logger.error(f"Batched embedding generation failed: {e}", exc_info=True)
+            self._fail_pending(requests, e)
+
+    def _fail_pending(self, requests: List[Dict[str, Any]], error: BaseException) -> None:
+        """Propagate an error to every request still awaiting a result."""
+        for req in requests:
+            if not isinstance(req, dict):
+                continue
+            future = req.get('future')
+            if future is not None and not future.done():
+                future.set_exception(error)
     
     def get_stats(self) -> Dict[str, Any]:
         """Get embedding manager statistics.
