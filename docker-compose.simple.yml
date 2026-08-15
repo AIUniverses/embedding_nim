@@ -18,6 +18,10 @@ services:
       - DEPLOYMENT_MODE=simple
       - ENABLE_REDIS=false
       - ENABLE_MONITORING=false
+      - EMBEDDING_API_KEY=${EMBEDDING_API_KEY:?EMBEDDING_API_KEY must be set}
+      - CORS_ORIGINS=${CORS_ORIGINS:-}
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS:-*}
+      - ENABLE_DOCS=${ENABLE_DOCS:-false}
     volumes:
       - ./config:/app/config:ro
       - ./logs:/app/logs

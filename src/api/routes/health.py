@@ -53,9 +53,9 @@ async def readiness_check(request: Request):
         )
         
     except Exception as e:
-        logger.error(f"Readiness check failed: {str(e)}")
+        logger.error(f"Readiness check failed: {str(e)}", exc_info=True)
         return HealthResponse(
-            message=f"Service not ready - {str(e)}",
+            message="Service not ready",
             status="error"
         )
 
@@ -92,9 +92,9 @@ async def startup_check(request: Request):
         )
         
     except Exception as e:
-        logger.error(f"Startup check failed: {str(e)}")
+        logger.error(f"Startup check failed: {str(e)}", exc_info=True)
         return HealthResponse(
-            message=f"Service startup error - {str(e)}",
+            message="Service startup error",
             status="error"
         )
 
@@ -126,9 +126,9 @@ async def liveness_check(request: Request):
         )
         
     except Exception as e:
-        logger.error(f"Liveness check failed: {str(e)}")
+        logger.error(f"Liveness check failed: {str(e)}", exc_info=True)
         return HealthResponse(
-            message=f"Service error - {str(e)}",
+            message="Service error",
             status="error"
         )
 
@@ -177,8 +177,8 @@ async def basic_health_check(request: Request):
         )
         
     except Exception as e:
-        logger.error(f"Health check failed: {str(e)}")
+        logger.error(f"Health check failed: {str(e)}", exc_info=True)
         return HealthResponse(
-            message=f"Service health check error - {str(e)}",
+            message="Service health check error",
             status="unhealthy"
         )

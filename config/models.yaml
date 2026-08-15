@@ -168,6 +168,9 @@ models:
       max_memory_gb: 4
       query_prefix: "Represent this sentence for searching relevant passages: "
       passage_prefix: "Represent this sentence for retrieval: "
+      # Executing model repository code is opt-in. Only enable this for a
+      # model repository you have reviewed and pinned.
+      trust_remote_code: false
 
 # Service configuration
 service:

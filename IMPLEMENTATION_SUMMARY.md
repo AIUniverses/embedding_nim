@@ -129,7 +129,7 @@ response = requests.post("http://localhost:8009/v1/embeddings/batch", json=[
 
 ### Monitoring Access
 - **API**: http://localhost:8009/docs
-- **Grafana**: http://localhost:3000 (admin/admin123)
+- **Grafana**: http://localhost:3000 (admin / `$GRAFANA_ADMIN_PASSWORD`)
 - **Prometheus**: http://localhost:9090
 - **Qdrant**: http://localhost:6333
 

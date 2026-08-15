@@ -1,5 +1,6 @@
 """FastAPI server application for the embedding service."""
 
+import hmac
 import logging
 import os
 import asyncio
@@ -18,6 +19,12 @@ from ..model_manager import ModelManager
 from ..embedding_manager import EmbeddingManager
 from .routes import health, models, embeddings
 from .models import ErrorResponse, create_error_response
+from .security import (
+    get_api_key,
+    get_allowed_hosts,
+    get_cors_config,
+    docs_enabled,
+)
 
 
 # Configure logging
@@ -102,28 +109,30 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
     
+    expose_docs = docs_enabled()
+
     app = FastAPI(
         title="Embedding Service",
         description="NVIDIA NIM-compatible embedding service supporting multiple model families",
         version="1.0.0",
-        docs_url="/docs",
-        redoc_url="/redoc",
-        openapi_url="/openapi.json",
+        docs_url="/docs" if expose_docs else None,
+        redoc_url="/redoc" if expose_docs else None,
+        openapi_url="/openapi.json" if expose_docs else None,
         lifespan=lifespan
     )
-    
-    # Add middleware
+
+    cors = get_cors_config()
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # Configure appropriately for production
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_origins=cors.origins,
+        allow_credentials=cors.allow_credentials,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
     )
-    
+
     app.add_middleware(
         TrustedHostMiddleware,
-        allowed_hosts=["*"]  # Configure appropriately for production
+        allowed_hosts=get_allowed_hosts()
     )
     
     # Include routers
@@ -219,22 +228,27 @@ def create_app() -> FastAPI:
         return response
 
     # API Key + simple rate limit (per-IP) middleware
-    API_KEY = os.getenv('EMBEDDING_API_KEY')
+    API_KEY = get_api_key()
     RATE_LIMIT = int(os.getenv('RATE_LIMIT_PER_MINUTE', '100'))
     rl_counters = defaultdict(lambda: {'count':0,'reset':time.time()+60})
+
+    # Only unauthenticated probe endpoints are exempt; docs, metrics and all
+    # /v1 endpoints require a valid API key when one is configured.
+    PUBLIC_PATHS = frozenset(('/', '/health', '/health/live'))
+    PUBLIC_PREFIXES = ('/v1/health',)
 
     @app.middleware("http")
     async def auth_and_rate_limit(request: Request, call_next):
         path = request.url.path
-        if path.startswith('/v1/health') or path in ('/','/docs','/openapi.json','/redoc'):  # exempt
+        if path in PUBLIC_PATHS or path.startswith(PUBLIC_PREFIXES):
             return await call_next(request)
         # API Key check
         if API_KEY:
-            auth_header = request.headers.get('authorization') or request.headers.get('Authorization')
+            auth_header = request.headers.get('authorization')
             if not auth_header or not auth_header.lower().startswith('bearer '):
                 return JSONResponse(status_code=401, content=create_error_response('Missing bearer token','unauthorized').dict())
             token = auth_header.split(' ',1)[1].strip()
-            if token != API_KEY:
+            if not hmac.compare_digest(token, API_KEY):
                 return JSONResponse(status_code=403, content=create_error_response('Invalid API key','forbidden').dict())
         # Rate limit per client IP
         client_ip = request.client.host if request.client else 'unknown'

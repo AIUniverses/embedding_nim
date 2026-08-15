@@ -55,7 +55,7 @@ class NVEmbedModel(BaseEmbeddingModel):
                 self.model = SentenceTransformer(
                     self.model_id,
                     device=self.device,
-                    trust_remote_code=self.model_config.get('settings', {}).get('trust_remote_code', True)
+                    trust_remote_code=self.model_config.get('settings', {}).get('trust_remote_code', False)
                 )
                 
                 # Set model to evaluation mode and appropriate dtype
@@ -67,12 +67,12 @@ class NVEmbedModel(BaseEmbeddingModel):
                 # Use transformers directly for more control
                 self.tokenizer = AutoTokenizer.from_pretrained(
                     self.model_id,
-                    trust_remote_code=self.model_config.get('settings', {}).get('trust_remote_code', True)
+                    trust_remote_code=self.model_config.get('settings', {}).get('trust_remote_code', False)
                 )
                 self.model = AutoModel.from_pretrained(
                     self.model_id,
                     torch_dtype=torch.float16 if self.model_config.get('torch_dtype') == 'float16' else torch.float32,
-                    trust_remote_code=self.model_config.get('settings', {}).get('trust_remote_code', True)
+                    trust_remote_code=self.model_config.get('settings', {}).get('trust_remote_code', False)
                 )
                 self.model.to(self.device)
                 self.model.eval()
