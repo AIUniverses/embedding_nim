@@ -6,6 +6,12 @@ import uuid
 from typing import Union, List
 from fastapi import APIRouter, Request, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
+from ..dependencies import (
+    get_app_component,
+    get_managers,
+    get_websocket_managers,
+    resolve_input_type
+)
 from ..models import (
     EmbeddingRequest, 
     EmbeddingResponse, 
@@ -87,30 +93,19 @@ async def create_embeddings(request: EmbeddingRequest, http_request: Request):
     start_time = time.time()
     
     try:
-        # Get service components
-        embedding_manager = getattr(http_request.app.state, 'embedding_manager', None)
-        config_manager = getattr(http_request.app.state, 'config_manager', None)
-        
-        if not embedding_manager or not config_manager:
-            raise HTTPException(
-                status_code=500, 
-                detail="Service not properly initialized"
-            )
+        embedding_manager, config_manager = get_managers(
+            http_request, 'embedding_manager', 'config_manager'
+        )
         
         # Validate request parameters
         await _validate_request(request, config_manager)
         
         # Normalize input to list format
-        if isinstance(request.input, str):
-            inputs = [request.input]
-        else:
-            inputs = request.input
+        inputs = [request.input] if isinstance(request.input, str) else request.input
         
-        # Parse model name for input_type suffix
-        base_model_name, suffix_input_type = validate_model_name(request.model)
-        
-        # Determine effective input_type
-        effective_input_type = request.input_type or suffix_input_type
+        base_model_name, effective_input_type = resolve_input_type(
+            request.model, request.input_type
+        )
         
         # Log request with ID
         logger.info(
@@ -164,13 +159,15 @@ async def streaming_embeddings(websocket: WebSocket):
     await websocket.accept()
     
     try:
-        # Get service components
-        embedding_manager = getattr(websocket.app.state, 'embedding_manager', None)
-        config_manager = getattr(websocket.app.state, 'config_manager', None)
+        managers = get_websocket_managers(
+            websocket, 'embedding_manager', 'config_manager'
+        )
         
-        if not embedding_manager or not config_manager:
+        if managers is None:
             await websocket.send_json({"error": "Service not properly initialized"})
             return
+        
+        embedding_manager, config_manager = managers
         
         while True:
             try:
@@ -250,15 +247,9 @@ async def create_embeddings_batch(requests: List[EmbeddingRequest], http_request
     start_time = time.time()
     
     try:
-        # Get service components
-        embedding_manager = getattr(http_request.app.state, 'embedding_manager', None)
-        config_manager = getattr(http_request.app.state, 'config_manager', None)
-        
-        if not embedding_manager or not config_manager:
-            raise HTTPException(
-                status_code=500, 
-                detail="Service not properly initialized"
-            )
+        embedding_manager, config_manager = get_managers(
+            http_request, 'embedding_manager', 'config_manager'
+        )
         
         # Validate batch size
         max_batch_size = config_manager.get_max_batch_size()
@@ -281,8 +272,9 @@ async def create_embeddings_batch(requests: List[EmbeddingRequest], http_request
                 
                 # Process request
                 inputs = request.input if isinstance(request.input, list) else [request.input]
-                base_model_name, suffix_input_type = validate_model_name(request.model)
-                effective_input_type = request.input_type or suffix_input_type
+                base_model_name, effective_input_type = resolve_input_type(
+                    request.model, request.input_type
+                )
                 
                 response = await embedding_manager.generate_embeddings(
                     inputs=inputs,
@@ -326,10 +318,9 @@ async def create_embeddings_batch(requests: List[EmbeddingRequest], http_request
 async def get_embedding_metrics(http_request: Request):
     """Get embedding service metrics and statistics."""
     try:
-        embedding_manager = getattr(http_request.app.state, 'embedding_manager', None)
-        
-        if not embedding_manager:
-            raise HTTPException(status_code=500, detail="Service not initialized")
+        embedding_manager = get_app_component(
+            http_request, 'embedding_manager', detail="Service not initialized"
+        )
         
         # Get cache statistics if available
         cache_stats = {}
@@ -414,8 +405,7 @@ async def _validate_request(request: EmbeddingRequest, config_manager) -> None:
         
         # Validate input_type for model
         supports_input_type = config_manager.supports_input_type(base_model_name)
-        base_model_name_parsed, suffix_input_type = validate_model_name(request.model)
-        effective_input_type = request.input_type or suffix_input_type
+        _, effective_input_type = resolve_input_type(request.model, request.input_type)
         
         if supports_input_type and effective_input_type is None:
             raise HTTPException(
@@ -456,11 +446,9 @@ async def list_embedding_models(http_request: Request):
     Returns detailed information about embedding capabilities.
     """
     try:
-        config_manager = getattr(http_request.app.state, 'config_manager', None)
-        model_manager = getattr(http_request.app.state, 'model_manager', None)
-        
-        if not config_manager or not model_manager:
-            raise HTTPException(status_code=500, detail="Service not properly initialized")
+        config_manager, model_manager = get_managers(
+            http_request, 'config_manager', 'model_manager'
+        )
         
         available_models = config_manager.get_available_models()
         detailed_models = []

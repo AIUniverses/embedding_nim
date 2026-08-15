@@ -4,6 +4,14 @@ import numpy as np
 import logging
 from typing import List, Dict, Any, Optional, Union
 
+from .vector_ops import (
+    l2_normalize,
+    pack_binary,
+    quantize_int8,
+    quantize_uint8,
+    truncate_dimensions
+)
+
 
 class EmbeddingPostprocessor:
     """Utilities for postprocessing embeddings."""
@@ -20,10 +28,7 @@ class EmbeddingPostprocessor:
         Returns:
             Normalized embeddings
         """
-        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-        # Avoid division by zero
-        norms = np.where(norms == 0, 1, norms)
-        return embeddings / norms
+        return l2_normalize(embeddings)
     
     def reduce_dimensions(
         self, 
@@ -45,8 +50,7 @@ class EmbeddingPostprocessor:
             return embeddings
         
         if method == 'truncate':
-            # Simple truncation (Matryoshka-style)
-            return embeddings[:, :target_dim]
+            return truncate_dimensions(embeddings, target_dim)
         elif method == 'pca':
             return self._pca_reduce(embeddings, target_dim)
         elif method == 'random':
@@ -113,53 +117,20 @@ class EmbeddingPostprocessor:
             Quantized embeddings
         """
         if quantization_type == 'int8':
-            return self._quantize_int8(embeddings)
+            return quantize_int8(embeddings)
         elif quantization_type == 'uint8':
-            return self._quantize_uint8(embeddings)
-        elif quantization_type == 'binary':
-            return self._quantize_binary(embeddings, signed=True)
-        elif quantization_type == 'ubinary':
-            return self._quantize_binary(embeddings, signed=False)
+            return quantize_uint8(embeddings)
+        elif quantization_type in ('binary', 'ubinary'):
+            # Adaptive threshold based on the value distribution
+            return pack_binary(
+                embeddings,
+                signed=(quantization_type == 'binary'),
+                threshold_method='median'
+            )
         elif quantization_type == 'float':
             return embeddings.astype(np.float32)
         else:
             raise ValueError(f"Unknown quantization type: {quantization_type}")
-    
-    def _quantize_int8(self, embeddings: np.ndarray) -> np.ndarray:
-        """Quantize to int8 range [-127, 127]."""
-        # Scale to preserve relative magnitudes
-        max_abs = np.max(np.abs(embeddings), axis=1, keepdims=True)
-        max_abs = np.where(max_abs == 0, 1, max_abs)  # Avoid division by zero
-        
-        scaled = embeddings / max_abs * 127
-        return scaled.astype(np.int8)
-    
-    def _quantize_uint8(self, embeddings: np.ndarray) -> np.ndarray:
-        """Quantize to uint8 range [0, 255]."""
-        # Min-max scaling per embedding
-        min_vals = np.min(embeddings, axis=1, keepdims=True)
-        max_vals = np.max(embeddings, axis=1, keepdims=True)
-        
-        # Avoid division by zero
-        ranges = max_vals - min_vals
-        ranges = np.where(ranges == 0, 1, ranges)
-        
-        scaled = (embeddings - min_vals) / ranges * 255
-        return scaled.astype(np.uint8)
-    
-    def _quantize_binary(self, embeddings: np.ndarray, signed: bool = True) -> np.ndarray:
-        """Quantize to binary representation."""
-        # Use adaptive threshold based on distribution
-        thresholds = np.median(embeddings, axis=1, keepdims=True)
-        binary_embeddings = (embeddings > thresholds).astype(np.uint8)
-        
-        # Pack bits into bytes
-        packed = np.packbits(binary_embeddings, axis=1)
-        
-        if signed:
-            return packed.astype(np.int8)
-        else:
-            return packed
     
     def compute_similarities(
         self, 
@@ -191,17 +162,7 @@ class EmbeddingPostprocessor:
     
     def _cosine_similarity(self, embeddings1: np.ndarray, embeddings2: np.ndarray) -> np.ndarray:
         """Compute cosine similarity."""
-        # Normalize embeddings
-        norm1 = np.linalg.norm(embeddings1, axis=1, keepdims=True)
-        norm2 = np.linalg.norm(embeddings2, axis=1, keepdims=True)
-        
-        norm1 = np.where(norm1 == 0, 1, norm1)
-        norm2 = np.where(norm2 == 0, 1, norm2)
-        
-        embeddings1_norm = embeddings1 / norm1
-        embeddings2_norm = embeddings2 / norm2
-        
-        return np.dot(embeddings1_norm, embeddings2_norm.T)
+        return np.dot(l2_normalize(embeddings1), l2_normalize(embeddings2).T)
     
     def _euclidean_distance(self, embeddings1: np.ndarray, embeddings2: np.ndarray) -> np.ndarray:
         """Compute Euclidean distance (negative for similarity)."""
