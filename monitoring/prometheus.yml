@@ -8,6 +8,12 @@ scrape_configs:
       - targets: ['embedding-service:8009']
     metrics_path: '/metrics'
     scrape_interval: 5s
+    # /metrics requires the service API key. Write the key to
+    # ./monitoring/embedding_api_key, mount it into the Prometheus container and
+    # uncomment the block below.
+    # authorization:
+    #   type: Bearer
+    #   credentials_file: /etc/prometheus/embedding_api_key
 
   - job_name: 'redis'
     static_configs:

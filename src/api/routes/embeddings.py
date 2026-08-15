@@ -5,7 +5,8 @@ import time
 import uuid
 from typing import Union, List
 from fastapi import APIRouter, Request, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse
+from pydantic import ValidationError
+from ..security import get_api_key, is_authorized
 from ..models import (
     EmbeddingRequest, 
     EmbeddingResponse, 
@@ -143,16 +144,16 @@ async def create_embeddings(request: EmbeddingRequest, http_request: Request):
             raise HTTPException(status_code=400, detail=str(e))
         except RuntimeError as e:
             logger.error(f"[{request_id}] Runtime error: {str(e)}")
-            raise HTTPException(status_code=500, detail=str(e))
+            raise HTTPException(status_code=500, detail="Internal server error")
         except Exception as e:
-            logger.error(f"[{request_id}] Unexpected error: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+            logger.error(f"[{request_id}] Unexpected error: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=500, detail="Internal server error")
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"[{request_id}] Error in create_embeddings endpoint: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        logger.error(f"[{request_id}] Error in create_embeddings endpoint: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.websocket("/v1/embeddings/stream")
@@ -161,6 +162,17 @@ async def streaming_embeddings(websocket: WebSocket):
     
     Allows real-time embedding generation with live updates.
     """
+    # WebSocket handshakes bypass HTTP middleware, so authentication and
+    # request validation have to be enforced here as well.
+    api_key = get_api_key()
+    authorization = websocket.headers.get('authorization')
+    if not authorization and websocket.query_params.get('api_key'):
+        authorization = f"Bearer {websocket.query_params['api_key']}"
+
+    if not is_authorized(authorization, api_key):
+        await websocket.close(code=1008, reason="Unauthorized")
+        return
+
     await websocket.accept()
     
     try:
@@ -178,10 +190,25 @@ async def streaming_embeddings(websocket: WebSocket):
                 data = await websocket.receive_json()
                 request_id = str(uuid.uuid4())
                 
-                # Validate basic structure
-                if 'model' not in data or 'input' not in data:
+                # Validate the payload with the same rules as the HTTP endpoint
+                try:
+                    parsed_request = EmbeddingRequest(**data)
+                    await _validate_request(parsed_request, config_manager)
+                except ValidationError as e:
                     await websocket.send_json({
-                        "error": "Missing required fields: model, input",
+                        "error": f"Invalid request: {e.errors()}",
+                        "request_id": request_id
+                    })
+                    continue
+                except HTTPException as e:
+                    await websocket.send_json({
+                        "error": e.detail,
+                        "request_id": request_id
+                    })
+                    continue
+                except TypeError:
+                    await websocket.send_json({
+                        "error": "Invalid request payload",
                         "request_id": request_id
                     })
                     continue
@@ -195,16 +222,17 @@ async def streaming_embeddings(websocket: WebSocket):
                 
                 # Process embeddings
                 try:
-                    inputs = data['input'] if isinstance(data['input'], list) else [data['input']]
+                    inputs = parsed_request.input if isinstance(parsed_request.input, list) else [parsed_request.input]
+                    _, suffix_input_type = validate_model_name(parsed_request.model)
                     
                     response = await embedding_manager.generate_embeddings(
                         inputs=inputs,
-                        model=data['model'],
-                        input_type=data.get('input_type'),
-                        modality=data.get('modality'),
-                        embedding_type=data.get('embedding_type', 'float'),
-                        dimensions=data.get('dimensions'),
-                        normalize=data.get('normalize', True)
+                        model=parsed_request.model,
+                        input_type=parsed_request.input_type or suffix_input_type,
+                        modality=parsed_request.modality,
+                        embedding_type=parsed_request.embedding_type,
+                        dimensions=parsed_request.dimensions,
+                        normalize=parsed_request.normalize
                     )
                     
                     # Send success response
@@ -213,21 +241,21 @@ async def streaming_embeddings(websocket: WebSocket):
                     await websocket.send_json(response)
                     
                 except Exception as e:
-                    # Send error response
+                    logger.error(f"[{request_id}] WebSocket processing error: {str(e)}", exc_info=True)
                     await websocket.send_json({
                         "status": "error",
                         "request_id": request_id,
-                        "error": str(e)
+                        "error": "Failed to generate embeddings"
                     })
                 
             except WebSocketDisconnect:
                 logger.info("WebSocket client disconnected")
                 break
             except Exception as e:
-                logger.error(f"WebSocket error: {str(e)}")
+                logger.error(f"WebSocket error: {str(e)}", exc_info=True)
                 await websocket.send_json({
                     "status": "error",
-                    "error": f"Processing error: {str(e)}"
+                    "error": "Processing error"
                 })
                 
     except Exception as e:
@@ -318,7 +346,7 @@ async def create_embeddings_batch(requests: List[EmbeddingRequest], http_request
         raise
     except Exception as e:
         logger.error(f"[{batch_id}] Batch processing error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Batch processing error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Batch processing error")
 
 
 @router.get("/v1/embeddings/metrics")
@@ -346,8 +374,8 @@ async def get_embedding_metrics(http_request: Request):
         }
         
     except Exception as e:
-        logger.error(f"Error getting metrics: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error getting metrics: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to get metrics")
 
 
 async def _validate_request(request: EmbeddingRequest, config_manager) -> None:
@@ -435,9 +463,12 @@ async def _validate_request(request: EmbeddingRequest, config_manager) -> None:
         
     except HTTPException:
         raise
-    except Exception as e:
+    except ValueError as e:
         logger.error(f"Validation error: {str(e)}")
         raise HTTPException(status_code=400, detail=f"Request validation failed: {str(e)}")
+    except Exception as e:
+        logger.error(f"Unexpected validation error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=400, detail="Request validation failed")
 
 
 @router.post("/embeddings", response_model=EmbeddingResponse)
@@ -499,4 +530,4 @@ async def list_embedding_models(http_request: Request):
         raise
     except Exception as e:
         logger.error(f"Error listing embedding models: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to list embedding models: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to list embedding models")

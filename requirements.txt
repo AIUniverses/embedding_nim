@@ -2,15 +2,18 @@
 
 # Core ML libraries
 torch==2.8.0
-transformers==4.45.0
+# >=4.48 avoids the ReDoS/unsafe-deserialization advisories in earlier releases
+transformers>=4.53.0,<5.0.0
 sentence-transformers>=2.7.0
 accelerate>=0.20.0
 
 # FastAPI stack
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-pydantic==2.5.0
-python-multipart==0.0.6
+# >=0.115.6 pulls a Starlette release without the multipart DoS (CVE-2024-47874)
+fastapi>=0.115.6,<0.142.0
+uvicorn[standard]>=0.30.0,<1.0.0
+pydantic>=2.9.0,<3.0.0
+# >=0.0.18 fixes CVE-2024-24762 and CVE-2024-53981 (multipart DoS)
+python-multipart>=0.0.18,<1.0.0
 
 # Image processing (for multimodal support)
 Pillow>=10.0.0
@@ -34,15 +37,8 @@ aiofiles>=23.0.0
 prometheus-client>=0.17.0
 structlog>=23.0.0
 
-# Authentication & Security
-python-jose[cryptography]==3.3.0
-passlib[bcrypt]==1.7.4
-PyJWT>=2.8.0
-
-# Rate limiting
-slowapi>=0.1.9
+# Caching / rate limiting backend
 redis>=5.0.0
-aioredis>=2.0.0
 
 # Environment management
 python-dotenv>=1.0.0

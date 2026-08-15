@@ -3,7 +3,6 @@
 import hashlib
 import json
 import logging
-import pickle
 import time
 import asyncio
 from typing import Any, Dict, List, Optional, Union
@@ -21,6 +20,35 @@ try:
     DISKCACHE_AVAILABLE = True
 except ImportError:
     DISKCACHE_AVAILABLE = False
+
+
+class _JSONEncoder(json.JSONEncoder):
+    """JSON encoder that understands numpy scalars and arrays."""
+
+    def default(self, o: Any) -> Any:
+        if isinstance(o, np.ndarray):
+            return o.tolist()
+        if isinstance(o, np.integer):
+            return int(o)
+        if isinstance(o, np.floating):
+            return float(o)
+        if isinstance(o, np.bool_):
+            return bool(o)
+        return super().default(o)
+
+
+def serialize_value(value: Any) -> bytes:
+    """Serialize a cache value to JSON bytes.
+
+    JSON is used instead of pickle so that a compromised or shared cache cannot
+    execute arbitrary code during deserialization.
+    """
+    return json.dumps(value, cls=_JSONEncoder).encode('utf-8')
+
+
+def deserialize_value(data: bytes) -> Any:
+    """Deserialize a cache value from JSON bytes."""
+    return json.loads(data.decode('utf-8'))
 
 
 class CacheBackend(ABC):
@@ -166,7 +194,13 @@ class RedisCache(CacheBackend):
                 return None
             
             # Deserialize data
-            value = pickle.loads(data)
+            try:
+                value = deserialize_value(data)
+            except (ValueError, UnicodeDecodeError):
+                # Entry written by an older, unsupported serialization format
+                self.logger.warning("Discarding unreadable cache entry: %s", key)
+                await self.delete(key)
+                return None
             
             # Update access statistics
             await redis.hincrby(f"{key}:stats", "access_count", 1)
@@ -184,7 +218,7 @@ class RedisCache(CacheBackend):
             redis = await self._get_redis()
             
             # Serialize data
-            data = pickle.dumps(value)
+            data = serialize_value(value)
             
             # Set with TTL
             ttl_seconds = ttl or self.default_ttl

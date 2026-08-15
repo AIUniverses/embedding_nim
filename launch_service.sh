@@ -119,9 +119,9 @@ case $ACTION in
         echo "- API Documentation: http://localhost:8009/docs"
         
         if [[ "$MODE" == "full" ]]; then
-            echo "- Redis: localhost:6379"
+            echo "- Redis: internal to the compose network only"
             echo "- Prometheus: http://localhost:9090"
-            echo "- Grafana: http://localhost:3000 (admin/admin123)"
+            echo "- Grafana: http://localhost:3000 (admin / \$GRAFANA_ADMIN_PASSWORD)"
             echo "- Qdrant: http://localhost:6333"
         fi
         

@@ -40,7 +40,7 @@ async def list_models(request: Request):
         
     except Exception as e:
         logger.error(f"Error listing models: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to list models: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to list models")
 
 
 @router.get("/v1/models/{model_id}")
@@ -88,7 +88,7 @@ async def get_model_info(model_id: str, request: Request):
         raise
     except Exception as e:
         logger.error(f"Error getting model info for {model_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to get model info: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get model info")
 
 
 @router.post("/v1/models/{model_id}/load", response_model=HealthResponse)
@@ -137,7 +137,7 @@ async def load_model(model_id: str, request: Request):
         raise
     except Exception as e:
         logger.error(f"Error loading model {model_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to load model: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to load model")
 
 
 @router.post("/v1/models/{model_id}/unload", response_model=HealthResponse)
@@ -175,7 +175,7 @@ async def unload_model(model_id: str, request: Request):
         raise
     except Exception as e:
         logger.error(f"Error unloading model {model_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to unload model: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to unload model")
 
 
 @router.get("/v1/models/{model_id}/status")
@@ -217,4 +217,4 @@ async def get_model_status(model_id: str, request: Request):
         raise
     except Exception as e:
         logger.error(f"Error getting model status for {model_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to get model status: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get model status")

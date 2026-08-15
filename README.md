@@ -39,6 +39,19 @@ A production-ready, NVIDIA NIM-compatible embedding service with advanced featur
 - NVIDIA GPU with CUDA support (for GPU acceleration)
 - 8GB+ GPU memory (recommended)
 
+### Required Secrets
+`docker-compose` refuses to start until these are set (see `.env.example`):
+
+```bash
+cp .env.example .env
+# EMBEDDING_API_KEY    - API key clients must send as `Authorization: Bearer ...`
+# REDIS_PASSWORD       - Redis auth (full mode)
+# GRAFANA_ADMIN_PASSWORD - Grafana admin login (full mode)
+```
+
+For local development without authentication, set `ALLOW_UNAUTHENTICATED=true`
+instead of `EMBEDDING_API_KEY`.
+
 ### Simple Deployment
 ```bash
 # Make scripts executable
@@ -171,8 +184,11 @@ TRUNCATE=none
 ENABLE_FAKE_IMAGE_EMBEDDINGS=false
 
 # API security
-EMBEDDING_API_KEY=your-secret-key
+EMBEDDING_API_KEY=your-secret-key   # required (>=16 chars) unless ALLOW_UNAUTHENTICATED=true
 RATE_LIMIT_PER_MINUTE=100
+CORS_ORIGINS=                       # comma-separated allow-list; empty blocks cross-origin
+ALLOWED_HOSTS=*                     # comma-separated Host header allow-list
+ENABLE_DOCS=false                   # serve /docs, /redoc and /openapi.json
 ```
 
 ### Model Configuration
@@ -199,7 +215,7 @@ models:
 ## 📊 Monitoring & Observability
 
 ### Access Monitoring (Full Mode)
-- **Grafana Dashboard**: http://localhost:3000 (admin/admin123)
+- **Grafana Dashboard**: http://localhost:3000 (admin / `$GRAFANA_ADMIN_PASSWORD`)
 - **Prometheus Metrics**: http://localhost:9090
 - **Service Health**: http://localhost:8009/v1/health/ready
 - **API Documentation**: http://localhost:8009/docs
@@ -249,10 +265,17 @@ results = client.search(
 
 ## 🔒 Security Features
 
-### API Key Authentication (Optional)
+### API Key Authentication (Required)
+
+The service refuses to start unless `EMBEDDING_API_KEY` is set (minimum 16
+characters), or `ALLOW_UNAUTHENTICATED=true` is set explicitly for local
+development. Only `/`, `/health`, `/health/live` and `/v1/health/*` are public;
+`/metrics`, `/docs` and every `/v1` endpoint - including the
+`/v1/embeddings/stream` WebSocket - require the key.
+
 ```bash
 # Set API key
-export EMBEDDING_API_KEY="your-secret-key"
+export EMBEDDING_API_KEY="$(openssl rand -hex 32)"
 
 # Use in requests
 curl -H "Authorization: Bearer your-secret-key" \
