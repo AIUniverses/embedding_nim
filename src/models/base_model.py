@@ -5,6 +5,13 @@ from typing import List, Dict, Any, Optional, Union
 import torch
 import numpy as np
 
+from ..utils.vector_ops import (
+    pack_binary,
+    quantize_int8,
+    quantize_uint8,
+    truncate_dimensions
+)
+
 
 class BaseEmbeddingModel(ABC):
     """Abstract base class for all embedding models."""
@@ -162,68 +169,44 @@ class BaseEmbeddingModel(ABC):
             if dimensions not in self.supports_dimensions:
                 available = ', '.join(map(str, self.supports_dimensions))
                 raise ValueError(f"Dimension {dimensions} not supported. Available: {available}")
-            embeddings = embeddings[:, :dimensions]
+            embeddings = truncate_dimensions(embeddings, dimensions)
         
         # Type conversion
         if embedding_type == 'int8':
-            return self._convert_to_int8(embeddings)
+            return quantize_int8(embeddings)
         elif embedding_type == 'uint8':
-            return self._convert_to_uint8(embeddings)
+            return quantize_uint8(embeddings)
         elif embedding_type == 'binary':
-            return self._convert_to_binary(embeddings, signed=True)
+            return pack_binary(embeddings, signed=True, threshold_method='zero')
         elif embedding_type == 'ubinary':
-            return self._convert_to_binary(embeddings, signed=False)
+            return pack_binary(embeddings, signed=False, threshold_method='zero')
         else:
             return embeddings.astype(np.float32)
-
-        # -------------------- Added utility methods --------------------
-        def count_tokens(self, texts: List[str]) -> int:
-            """Approximate token count for usage metrics.
-            Prefers the tokenizer if available; falls back to whitespace split.
-            Args:
-                texts: list of raw (already prefix-processed) texts
-            Returns:
-                total token count (int)
-            """
-            if hasattr(self, 'tokenizer') and self.tokenizer is not None:
-                try:
-                    # HuggingFace tokenizers support batching
-                    enc = self.tokenizer(texts, truncation=False, add_special_tokens=True)
-                    if 'input_ids' in enc:
-                        if isinstance(enc['input_ids'][0], list):
-                            return sum(len(ids) for ids in enc['input_ids'])
-                        return len(enc['input_ids'])
-                except Exception:
-                    pass
-            # Fallback simple heuristic
-            return sum(len(t.strip().split()) for t in texts)
     
-    def _convert_to_int8(self, embeddings: np.ndarray) -> np.ndarray:
-        """Convert float embeddings to int8."""
-        # Simple quantization: scale to [-127, 127] range
-        embeddings_normalized = embeddings / np.max(np.abs(embeddings), axis=1, keepdims=True)
-        return (embeddings_normalized * 127).astype(np.int8)
-    
-    def _convert_to_uint8(self, embeddings: np.ndarray) -> np.ndarray:
-        """Convert float embeddings to uint8."""
-        # Scale to [0, 255] range
-        embeddings_min = np.min(embeddings, axis=1, keepdims=True)
-        embeddings_max = np.max(embeddings, axis=1, keepdims=True)
-        embeddings_scaled = (embeddings - embeddings_min) / (embeddings_max - embeddings_min)
-        return (embeddings_scaled * 255).astype(np.uint8)
-    
-    def _convert_to_binary(self, embeddings: np.ndarray, signed: bool = True) -> np.ndarray:
-        """Convert float embeddings to binary."""
-        # Convert to binary based on sign (positive = 1, negative = 0)
-        binary_embeddings = (embeddings > 0).astype(np.uint8)
+    def count_tokens(self, texts: List[str]) -> int:
+        """Approximate token count for usage metrics.
         
-        # Pack bits into bytes
-        packed_embeddings = np.packbits(binary_embeddings, axis=1)
+        Prefers the tokenizer if available; falls back to whitespace split.
         
-        if signed:
-            return packed_embeddings.astype(np.int8)
-        else:
-            return packed_embeddings
+        Args:
+            texts: list of raw (already prefix-processed) texts
+            
+        Returns:
+            total token count (int)
+        """
+        if self.tokenizer is not None:
+            try:
+                # HuggingFace tokenizers support batching
+                enc = self.tokenizer(texts, truncation=False, add_special_tokens=True)
+                if 'input_ids' in enc:
+                    if isinstance(enc['input_ids'][0], list):
+                        return sum(len(ids) for ids in enc['input_ids'])
+                    return len(enc['input_ids'])
+            except Exception:
+                pass
+        
+        # Fallback simple heuristic
+        return sum(len(t.strip().split()) for t in texts)
     
     def get_memory_usage(self) -> Dict[str, float]:
         """Get current memory usage information.

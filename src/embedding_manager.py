@@ -131,20 +131,6 @@ class EmbeddingManager:
             self.batch_size_histogram = DummyMetric()
             self.queue_size_gauge = DummyMetric()
 
-    async def start_batch_processor(self):
-        if self.enable_dynamic_batching and self._batch_processor_task is None:
-            self._batch_processor_task = asyncio.create_task(self._batch_processor_loop())
-            self.logger.info("Batch processor started")
-
-    async def stop_batch_processor(self):
-        if self._batch_processor_task:
-            self._batch_processor_task.cancel()
-            try:
-                await self._batch_processor_task
-            except asyncio.CancelledError:
-                pass
-            self._batch_processor_task = None
-
     async def generate_embeddings(self, inputs: List[Union[str, Dict[str, Any]]], model: str, input_type: Optional[str] = None, modality: Optional[Union[str, List[str]]] = None, embedding_type: str = 'float', dimensions: Optional[int] = None, normalize: bool = True) -> Dict[str, Any]:
         start_time = time.time()
         self._processing_stats['total_requests'] += 1

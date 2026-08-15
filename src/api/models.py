@@ -4,6 +4,8 @@ from typing import List, Optional, Union, Any, Dict
 from pydantic import BaseModel, Field, field_validator
 import re
 
+from ..utils.model_names import parse_model_name
+
 
 class EmbeddingRequest(BaseModel):
     """Request model for embedding generation."""
@@ -252,13 +254,7 @@ def validate_model_name(model_name: str) -> tuple[str, Optional[str]]:
     if not model_name or not isinstance(model_name, str):
         raise ValueError("Model name must be a non-empty string")
     
-    # Parse model name for input type suffixes
-    if model_name.endswith('-query'):
-        return model_name[:-6], 'query'
-    elif model_name.endswith('-passage'):
-        return model_name[:-8], 'passage'
-    else:
-        return model_name, None
+    return parse_model_name(model_name)
 
 
 def validate_input_length(inputs: Union[str, List[str]], max_length: int) -> None:

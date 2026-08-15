@@ -2,6 +2,7 @@
 
 import logging
 from fastapi import APIRouter, Request
+from ..dependencies import get_app_component
 from ..models import HealthResponse
 
 router = APIRouter()
@@ -16,7 +17,7 @@ async def readiness_check(request: Request):
     """
     try:
         # Check if embedding manager is available
-        embedding_manager = getattr(request.app.state, 'embedding_manager', None)
+        embedding_manager = get_app_component(request, 'embedding_manager', required=False)
         if not embedding_manager:
             return HealthResponse(
                 message="Service not ready - embedding manager not initialized",
@@ -24,7 +25,7 @@ async def readiness_check(request: Request):
             )
         
         # Check if model manager is available
-        model_manager = getattr(request.app.state, 'model_manager', None)
+        model_manager = get_app_component(request, 'model_manager', required=False)
         if not model_manager:
             return HealthResponse(
                 message="Service not ready - model manager not initialized", 
@@ -69,8 +70,8 @@ async def startup_check(request: Request):
     """
     try:
         # Check if basic services are initialized
-        embedding_manager = getattr(request.app.state, 'embedding_manager', None)
-        model_manager = getattr(request.app.state, 'model_manager', None)
+        embedding_manager = get_app_component(request, 'embedding_manager', required=False)
+        model_manager = get_app_component(request, 'model_manager', required=False)
         
         if not embedding_manager or not model_manager:
             return HealthResponse(
@@ -141,9 +142,9 @@ async def basic_health_check(request: Request):
     """
     try:
         # Get service state
-        embedding_manager = getattr(request.app.state, 'embedding_manager', None)
-        model_manager = getattr(request.app.state, 'model_manager', None)
-        config_manager = getattr(request.app.state, 'config_manager', None)
+        embedding_manager = get_app_component(request, 'embedding_manager', required=False)
+        model_manager = get_app_component(request, 'model_manager', required=False)
+        config_manager = get_app_component(request, 'config_manager', required=False)
         
         status_parts = []
         

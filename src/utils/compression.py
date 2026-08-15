@@ -4,6 +4,16 @@ import numpy as np
 import logging
 from typing import Dict, Any, Optional
 
+from .vector_ops import (
+    compute_thresholds,
+    int8_scale_factors,
+    l2_normalize,
+    pack_binary,
+    quantize_int8,
+    quantize_uint8,
+    uint8_scale_factors
+)
+
 
 class EmbeddingCompressor:
     """Utilities for compressing embeddings to save storage and memory."""
@@ -64,13 +74,8 @@ class EmbeddingCompressor:
     
     def _compress_int8(self, embeddings: np.ndarray, **kwargs) -> Dict[str, Any]:
         """Compress to int8 with scaling factors."""
-        # Compute scaling factors per embedding
-        max_abs = np.max(np.abs(embeddings), axis=1, keepdims=True)
-        max_abs = np.where(max_abs == 0, 1, max_abs)  # Avoid division by zero
-        
-        # Scale to int8 range
-        scaled = embeddings / max_abs * 127
-        quantized = scaled.astype(np.int8)
+        max_abs = int8_scale_factors(embeddings)
+        quantized = quantize_int8(embeddings)
         
         return {
             'compression_type': 'int8',
@@ -90,17 +95,8 @@ class EmbeddingCompressor:
     
     def _compress_uint8(self, embeddings: np.ndarray, **kwargs) -> Dict[str, Any]:
         """Compress to uint8 with min-max scaling."""
-        # Compute min-max per embedding
-        min_vals = np.min(embeddings, axis=1, keepdims=True)
-        max_vals = np.max(embeddings, axis=1, keepdims=True)
-        
-        # Avoid division by zero
-        ranges = max_vals - min_vals
-        ranges = np.where(ranges == 0, 1, ranges)
-        
-        # Scale to uint8 range
-        scaled = (embeddings - min_vals) / ranges * 255
-        quantized = scaled.astype(np.uint8)
+        min_vals, max_vals = uint8_scale_factors(embeddings)
+        quantized = quantize_uint8(embeddings)
         
         return {
             'compression_type': 'uint8',
@@ -126,22 +122,11 @@ class EmbeddingCompressor:
         """Compress to binary representation."""
         # Use adaptive threshold or zero threshold
         threshold_method = kwargs.get('threshold_method', 'median')
+        if threshold_method not in ('median', 'mean'):
+            threshold_method = 'zero'
         
-        if threshold_method == 'median':
-            thresholds = np.median(embeddings, axis=1, keepdims=True)
-        elif threshold_method == 'mean':
-            thresholds = np.mean(embeddings, axis=1, keepdims=True)
-        else:  # zero
-            thresholds = np.zeros((embeddings.shape[0], 1))
-        
-        # Binarize
-        binary_embeddings = (embeddings > thresholds).astype(np.uint8)
-        
-        # Pack bits into bytes
-        packed = np.packbits(binary_embeddings, axis=1)
-        
-        if signed:
-            packed = packed.astype(np.int8)
+        thresholds = compute_thresholds(embeddings, threshold_method)
+        packed = pack_binary(embeddings, signed=signed, thresholds=thresholds)
         
         return {
             'compression_type': 'binary' if signed else 'ubinary',
@@ -214,11 +199,8 @@ class EmbeddingCompressor:
         mae = np.mean(np.abs(original - decompressed))
         
         # Cosine similarity preservation
-        original_norms = np.linalg.norm(original, axis=1, keepdims=True)
-        decompressed_norms = np.linalg.norm(decompressed, axis=1, keepdims=True)
-        
-        original_normalized = original / np.where(original_norms == 0, 1, original_norms)
-        decompressed_normalized = decompressed / np.where(decompressed_norms == 0, 1, decompressed_norms)
+        original_normalized = l2_normalize(original)
+        decompressed_normalized = l2_normalize(decompressed)
         
         cosine_similarities = np.sum(original_normalized * decompressed_normalized, axis=1)
         mean_cosine_similarity = np.mean(cosine_similarities)

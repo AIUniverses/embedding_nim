@@ -2,6 +2,7 @@
 
 import logging
 from fastapi import APIRouter, Request, HTTPException
+from ..dependencies import get_app_component, get_model_context
 from ..models import ModelsResponse, ModelInfo, HealthResponse
 
 router = APIRouter()
@@ -15,9 +16,9 @@ async def list_models(request: Request):
     Returns a list of all available models that can be used for embedding generation.
     """
     try:
-        config_manager = getattr(request.app.state, 'config_manager', None)
-        if not config_manager:
-            raise HTTPException(status_code=500, detail="Configuration manager not available")
+        config_manager = get_app_component(
+            request, 'config_manager', detail="Configuration manager not available"
+        )
         
         # Get available models
         available_models = config_manager.get_available_models()
@@ -51,13 +52,9 @@ async def get_model_info(model_id: str, request: Request):
         model_id: The ID of the model to get information about
     """
     try:
-        model_manager = getattr(request.app.state, 'model_manager', None)
-        if not model_manager:
-            raise HTTPException(status_code=500, detail="Model manager not available")
-        
-        # Parse model name to handle suffixes
-        config_manager = getattr(request.app.state, 'config_manager', None)
-        base_model_name, _ = config_manager.parse_model_name(model_id)
+        model_manager, config_manager, base_model_name = get_model_context(
+            request, model_id
+        )
         
         # Get model info
         model_info = model_manager.get_model_info(base_model_name)
@@ -99,13 +96,9 @@ async def load_model(model_id: str, request: Request):
         model_id: The ID of the model to load
     """
     try:
-        model_manager = getattr(request.app.state, 'model_manager', None)
-        if not model_manager:
-            raise HTTPException(status_code=500, detail="Model manager not available")
-        
-        # Parse model name to handle suffixes
-        config_manager = getattr(request.app.state, 'config_manager', None)
-        base_model_name, _ = config_manager.parse_model_name(model_id)
+        model_manager, config_manager, base_model_name = get_model_context(
+            request, model_id
+        )
         
         # Check if model exists
         available_models = config_manager.get_available_models()
@@ -148,13 +141,9 @@ async def unload_model(model_id: str, request: Request):
         model_id: The ID of the model to unload
     """
     try:
-        model_manager = getattr(request.app.state, 'model_manager', None)
-        if not model_manager:
-            raise HTTPException(status_code=500, detail="Model manager not available")
-        
-        # Parse model name to handle suffixes
-        config_manager = getattr(request.app.state, 'config_manager', None)
-        base_model_name, _ = config_manager.parse_model_name(model_id)
+        model_manager, config_manager, base_model_name = get_model_context(
+            request, model_id
+        )
         
         # Check if model is currently loaded
         if not model_manager.is_model_loaded(base_model_name):
@@ -186,13 +175,9 @@ async def get_model_status(model_id: str, request: Request):
         model_id: The ID of the model to check
     """
     try:
-        model_manager = getattr(request.app.state, 'model_manager', None)
-        if not model_manager:
-            raise HTTPException(status_code=500, detail="Model manager not available")
-        
-        # Parse model name to handle suffixes
-        config_manager = getattr(request.app.state, 'config_manager', None)
-        base_model_name, _ = config_manager.parse_model_name(model_id)
+        model_manager, config_manager, base_model_name = get_model_context(
+            request, model_id
+        )
         
         # Get model status
         is_loaded = model_manager.is_model_loaded(base_model_name)
