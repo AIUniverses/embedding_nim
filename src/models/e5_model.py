@@ -67,7 +67,8 @@ class E5Model(BaseEmbeddingModel):
             return True
             
         except Exception as e:
-            self.logger.error(f"Failed to load E5 model {self.model_id}: {str(e)}")
+            self.logger.error(f"Failed to load E5 model {self.model_id}: {str(e)}", exc_info=True)
+            self.load_error = f"{type(e).__name__}: {e}"
             return False
     
     def unload_model(self) -> None:
@@ -88,7 +89,7 @@ class E5Model(BaseEmbeddingModel):
             self.logger.info(f"E5 model {self.model_id} unloaded")
             
         except Exception as e:
-            self.logger.error(f"Error unloading E5 model: {str(e)}")
+            self.logger.error(f"Error unloading E5 model: {str(e)}", exc_info=True)
     
     def preprocess_text(self, text: str, input_type: Optional[str] = None) -> str:
         """Preprocess text with E5-specific prefixes.
@@ -166,7 +167,7 @@ class E5Model(BaseEmbeddingModel):
             return embeddings
             
         except Exception as e:
-            self.logger.error(f"Error encoding texts with E5 model: {str(e)}")
+            self.logger.error(f"Error encoding texts with E5 model: {str(e)}", exc_info=True)
             raise
     
     def _encode_with_transformers(

@@ -40,12 +40,14 @@ async def readiness_check(request: Request):
             )
         
         # Get loaded models status (don't try to load, just check)
-        loaded_models = []
-        if model_manager:
-            try:
-                loaded_models = model_manager.get_loaded_models()
-            except Exception:
-                pass
+        try:
+            model_manager.get_loaded_models()
+        except Exception as e:
+            logger.error(f"Failed to read loaded model state: {e}", exc_info=True)
+            return HealthResponse(
+                message=f"Service not ready - unable to read model state: {e}",
+                status="not_ready"
+            )
         
         return HealthResponse(
             message="Service is ready.",
@@ -53,7 +55,7 @@ async def readiness_check(request: Request):
         )
         
     except Exception as e:
-        logger.error(f"Readiness check failed: {str(e)}")
+        logger.error(f"Readiness check failed: {str(e)}", exc_info=True)
         return HealthResponse(
             message=f"Service not ready - {str(e)}",
             status="error"
@@ -92,7 +94,7 @@ async def startup_check(request: Request):
         )
         
     except Exception as e:
-        logger.error(f"Startup check failed: {str(e)}")
+        logger.error(f"Startup check failed: {str(e)}", exc_info=True)
         return HealthResponse(
             message=f"Service startup error - {str(e)}",
             status="error"
@@ -126,7 +128,7 @@ async def liveness_check(request: Request):
         )
         
     except Exception as e:
-        logger.error(f"Liveness check failed: {str(e)}")
+        logger.error(f"Liveness check failed: {str(e)}", exc_info=True)
         return HealthResponse(
             message=f"Service error - {str(e)}",
             status="error"
@@ -177,7 +179,7 @@ async def basic_health_check(request: Request):
         )
         
     except Exception as e:
-        logger.error(f"Health check failed: {str(e)}")
+        logger.error(f"Health check failed: {str(e)}", exc_info=True)
         return HealthResponse(
             message=f"Service health check error - {str(e)}",
             status="unhealthy"

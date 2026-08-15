@@ -59,16 +59,25 @@ async def lifespan(app: FastAPI):
             # Create background task for model loading
             async def load_default_model():
                 try:
-                    success = model_manager.load_model(default_model)
+                    success = await model_manager.load_model_async(default_model)
                     if success:
                         logger.info(f"Default model {default_model} loaded successfully")
                         app.state.default_model_loaded = True
+                        app.state.default_model_error = None
                     else:
-                        logger.warning(f"Failed to load default model {default_model}")
+                        reason = model_manager.get_last_load_error() or 'unknown error'
+                        logger.error(
+                            f"Failed to load default model {default_model}: {reason}"
+                        )
                         app.state.default_model_loaded = False
+                        app.state.default_model_error = reason
                 except Exception as e:
-                    logger.error(f"Failed to load default model {default_model}: {str(e)}")
+                    logger.error(
+                        f"Failed to load default model {default_model}: {str(e)}",
+                        exc_info=True
+                    )
                     app.state.default_model_loaded = False
+                    app.state.default_model_error = str(e)
             
             # Start background model loading
             asyncio.create_task(load_default_model())
@@ -81,22 +90,35 @@ async def lifespan(app: FastAPI):
         yield
         
     except Exception as e:
-        logger.error(f"Failed to start embedding service: {str(e)}")
+        logger.error(f"Failed to start embedding service: {str(e)}", exc_info=True)
         app.state.service_ready = False
         raise
     
     # Shutdown
     logger.info("Shutting down embedding service...")
     
-    try:
-        # Unload all models
-        if hasattr(app.state, 'model_manager'):
+    shutdown_errors = []
+
+    # Stop the batch processor first so queued callers get an error instead of hanging
+    if hasattr(app.state, 'embedding_manager'):
+        try:
+            await app.state.embedding_manager.stop_batch_processor()
+        except Exception as e:
+            shutdown_errors.append(f"batch processor: {e}")
+            logger.error(f"Error stopping batch processor: {e}", exc_info=True)
+
+    # Unload all models
+    if hasattr(app.state, 'model_manager'):
+        try:
             await app.state.model_manager.shutdown()
-        
+        except Exception as e:
+            shutdown_errors.append(f"model manager: {e}")
+            logger.error(f"Error shutting down model manager: {e}", exc_info=True)
+
+    if shutdown_errors:
+        logger.error(f"Embedding service shutdown completed with errors: {shutdown_errors}")
+    else:
         logger.info("Embedding service shutdown complete")
-        
-    except Exception as e:
-        logger.error(f"Error during shutdown: {str(e)}")
 
 
 def create_app() -> FastAPI:
